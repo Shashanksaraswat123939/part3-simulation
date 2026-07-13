@@ -38,7 +38,12 @@ W_MAX_MM: float = 140.0
 COARSE_W_STEP_MM: float = 1.0
 REFINED_W_STEP_MM: float = 0.5
 D_HALO_MIN_MM: float = 0.0
-D_HALO_MAX_OFFSET_MM: float = 16.0   # d_halo ∈ [0, W + 16] mm
+# d_halo upper bound is STRICTLY less than W - 34 mm, derived from the halo
+# pocket placement constraint in Part 1 (halo pocket length 50mm, Ref Plane A
+# offset 16mm → pocket rear = ref_A + d_halo + 50mm must stay before rear axle).
+# This replaces the stale W+16 value which allowed candidates Part 1 rejects —
+# see audit finding K-5.  Mirrors geometry_contract._D_HALO_PLACEMENT_MARGIN_MM.
+D_HALO_PLACEMENT_MARGIN_MM: float = 34.0   # 50mm pocket - 16mm Ref_A offset
 
 # ---------------------------------------------------------------------------
 # Inner-loop convergence (spec: "Convergence Criteria")
@@ -108,15 +113,21 @@ def validate_W(W_mm: float) -> None:
 
 
 def validate_d_halo(d_halo_mm: float, W_mm: float) -> None:
-    """Raise ValueError unless d_halo ∈ [0, W + 16] mm."""
+    """Raise ValueError unless d_halo ∈ [0, W-34) mm (strict upper bound).
+
+    Upper bound mirrors Part 1's geometry_contract.validate_d_halo: the halo
+    pocket rear edge must stay strictly before the rear axle (pocket is 50mm long,
+    Ref Plane A is 16mm ahead of front axle, so d_halo < W - 34mm).
+    """
     validate_W(W_mm)
     if not (isinstance(d_halo_mm, (int, float)) and math.isfinite(d_halo_mm)):
         raise ValueError(f"d_halo_mm must be a finite number, got {d_halo_mm!r}")
-    upper = W_mm + D_HALO_MAX_OFFSET_MM
-    if not (D_HALO_MIN_MM <= d_halo_mm <= upper):
+    upper = W_mm - D_HALO_PLACEMENT_MARGIN_MM  # strict exclusive bound
+    if not (D_HALO_MIN_MM <= d_halo_mm < upper):
         raise ValueError(
             f"d_halo_mm={d_halo_mm} outside legal range "
-            f"[{D_HALO_MIN_MM}, {upper}] mm for W={W_mm} mm"
+            f"[{D_HALO_MIN_MM}, {upper:.1f}) mm for W={W_mm} mm "
+            f"(upper bound is W-34 mm, placement-derived)"
         )
 
 

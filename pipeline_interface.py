@@ -230,7 +230,8 @@ def real_bindings(
         out = {}
         for name, phi in phi_grids.items():
             new_phi = phi  # PhiGrid is mutated in place by design in Part 1
-            new_phi.phi = perturb_phi_array(new_phi.phi, seed=seed, amplitude=amplitude)
+            # P3-1(b): PhiGrid stores the array as `.grid`, not `.phi`.
+            new_phi.grid = perturb_phi_array(new_phi.grid, seed=seed, amplitude=amplitude)
             new_phi.apply_hard_constraints()
             out[name] = new_phi
         return out

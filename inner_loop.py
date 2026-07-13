@@ -229,7 +229,18 @@ def _run_single_iteration(
 
     # Steps 2–5: hard constraints + extraction + gates (Part 1 owns all of it;
     # run_quality_gates enforces constraints, extracts, repairs, retries).
-    gate = bindings.run_quality_gates(phi_grids, iter_id, out_dir)
+    # P3-3: unexpected exceptions (ImportError, AttributeError from K-5's halo
+    # ValueError during grid construction, etc.) must map to a lifecycle state
+    # and produce a record — never propagate as bare exceptions that kill the loop.
+    try:
+        gate = bindings.run_quality_gates(phi_grids, iter_id, out_dir)
+    except Exception as exc:  # noqa: BLE001
+        return failure(
+            "geometry_rejected",
+            f"run_quality_gates raised unexpected error: {exc}\n"
+            f"{traceback.format_exc(limit=3)}",
+            {},
+        )
     snaps = dict(gate.phi_snapshot_paths)
     if gate.lifecycle_state not in ("valid_simulated", "geometry_repaired"):
         return failure(gate.lifecycle_state, gate.failure_reason or "gates failed", snaps)

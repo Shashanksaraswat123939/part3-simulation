@@ -24,10 +24,14 @@ def test_wheelbase_and_halo_validation():
     expect_raises(ValueError, validate_W, 119.999)
     expect_raises(ValueError, validate_W, 140.001)
 
+    # Upper bound is W-34 mm, strict/exclusive (K-5, placement-derived — was
+    # W+16, which allowed candidates Part 1's hardware placement rejects).
+    # At W=120: bound is 86.0 mm.
     validate_d_halo(0.0, 120.0)
-    validate_d_halo(136.0, 120.0)
+    validate_d_halo(85.99, 120.0)
     expect_raises(ValueError, validate_d_halo, -0.01, 120.0)
-    expect_raises(ValueError, validate_d_halo, 136.01, 120.0)
+    expect_raises(ValueError, validate_d_halo, 86.0, 120.0)
+    expect_raises(ValueError, validate_d_halo, 136.0, 120.0)
 
 
 def test_config_and_weight_guards():
@@ -62,6 +66,7 @@ def test_candidate_lifecycle_consistency():
     ok = CandidateOutcome(
         candidate_id="ok",
         W_mm=130.0,
+        x_front_mm=64.0,
         d_halo_mm=40.0,
         lifecycle_state="valid_simulated",
         T_raw=1.25,
@@ -74,6 +79,7 @@ def test_candidate_lifecycle_consistency():
     dead = CandidateOutcome(
         candidate_id="dead",
         W_mm=130.0,
+        x_front_mm=64.0,
         d_halo_mm=40.0,
         lifecycle_state="CFD_failed",
         T_raw=None,
@@ -88,6 +94,7 @@ def test_candidate_lifecycle_consistency():
         CandidateOutcome,
         "bad_success",
         130.0,
+        64.0,
         40.0,
         "valid_simulated",
         None,
@@ -99,6 +106,7 @@ def test_candidate_lifecycle_consistency():
         CandidateOutcome,
         "bad_failure",
         130.0,
+        64.0,
         40.0,
         "CFD_failed",
         None,

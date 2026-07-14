@@ -45,6 +45,7 @@ from optimizer_contract import (
     GradientWeights,
     PenaltyInputs,
     validate_W,
+    validate_x_front,
     validate_d_halo,
 )
 from pipeline_interface import PipelineBindings, validate_bindings
@@ -65,6 +66,7 @@ class IterationLog:
 class InnerLoopResult:
     candidate_id: str
     W_mm: float
+    x_front_mm: float
     d_halo_mm: float
     converged: bool
     stop_reason: str
@@ -99,6 +101,7 @@ def run_inner_loop(
     config: OptimizerConfig,
     candidate_id: str,
     W_mm: float,
+    x_front_mm: float,
     d_halo_mm: float,
     initial_phi_grids: dict,
     out_dir: str,
@@ -111,7 +114,8 @@ def run_inner_loop(
         bindings: pipeline handshake (real or injected fake).
         config: optimizer configuration.
         candidate_id: base ID; per-iteration records get _iterNNNN suffixes.
-        W_mm, d_halo_mm: outer-loop scalars; validated against legal ranges.
+        W_mm, x_front_mm, d_halo_mm: outer-loop scalars; validated against
+            legal ranges.
         initial_phi_grids: dict of the four φ grids (fresh, warm-started, or
             perturbed) — ownership transfers to the loop, which mutates them.
         out_dir: directory for candidate records and φ snapshots.
@@ -126,6 +130,7 @@ def run_inner_loop(
     """
     validate_bindings(bindings)
     validate_W(W_mm)
+    validate_x_front(x_front_mm, W_mm)
     validate_d_halo(d_halo_mm, W_mm)
     if not candidate_id or "/" in candidate_id or "\\" in candidate_id:
         raise ValueError(f"candidate_id must be a plain name, got {candidate_id!r}")
@@ -146,7 +151,7 @@ def run_inner_loop(
         iter_id = _iter_candidate_id(candidate_id, iteration)
 
         outcome, log, phi_snapshot_paths = _run_single_iteration(
-            bindings, config, iter_id, W_mm, d_halo_mm, phi_grids, out_dir,
+            bindings, config, iter_id, W_mm, x_front_mm, d_halo_mm, phi_grids, out_dir,
             gradient_weights, penalty_provider, iteration,
         )
         history.append(log)
@@ -172,6 +177,7 @@ def run_inner_loop(
         best = CandidateOutcome(
             candidate_id=best.candidate_id,
             W_mm=best.W_mm,
+            x_front_mm=best.x_front_mm,
             d_halo_mm=best.d_halo_mm,
             lifecycle_state="converged",
             T_raw=best.T_raw,
@@ -184,6 +190,7 @@ def run_inner_loop(
     return InnerLoopResult(
         candidate_id=candidate_id,
         W_mm=W_mm,
+        x_front_mm=x_front_mm,
         d_halo_mm=d_halo_mm,
         converged=converged,
         stop_reason=stop_reason,
@@ -199,6 +206,7 @@ def _run_single_iteration(
     config: OptimizerConfig,
     iter_id: str,
     W_mm: float,
+    x_front_mm: float,
     d_halo_mm: float,
     phi_grids: dict,
     out_dir: str,
@@ -212,7 +220,7 @@ def _run_single_iteration(
 
     def failure(state: str, reason: str, snaps: dict) -> tuple:
         outcome = CandidateOutcome(
-            candidate_id=iter_id, W_mm=W_mm, d_halo_mm=d_halo_mm,
+            candidate_id=iter_id, W_mm=W_mm, x_front_mm=x_front_mm, d_halo_mm=d_halo_mm,
             lifecycle_state=state, T_raw=None, T_penalized=None,
             failure_reason=reason, phi_snapshot_paths=snaps,
         )
@@ -328,7 +336,7 @@ def _run_single_iteration(
         return failure("objective_failed", reason, snaps)
 
     outcome = CandidateOutcome(
-        candidate_id=iter_id, W_mm=W_mm, d_halo_mm=d_halo_mm,
+        candidate_id=iter_id, W_mm=W_mm, x_front_mm=x_front_mm, d_halo_mm=d_halo_mm,
         lifecycle_state=gate.lifecycle_state,
         T_raw=objective.T_raw, T_penalized=T_penalized,
         failure_reason=None, phi_snapshot_paths=snaps,
@@ -340,6 +348,7 @@ def _run_single_iteration(
     )
     outcome = CandidateOutcome(
         candidate_id=outcome.candidate_id, W_mm=outcome.W_mm,
+        x_front_mm=outcome.x_front_mm,
         d_halo_mm=outcome.d_halo_mm, lifecycle_state=outcome.lifecycle_state,
         T_raw=outcome.T_raw, T_penalized=outcome.T_penalized,
         failure_reason=None, phi_snapshot_paths=snaps, record_path=record_path,
@@ -359,6 +368,7 @@ def _try_write_record(bindings: PipelineBindings, outcome: CandidateOutcome,
     payload = {
         "candidate_id": outcome.candidate_id,
         "W_mm": outcome.W_mm,
+        "x_front_mm": outcome.x_front_mm,
         "d_halo_mm": outcome.d_halo_mm,
         "lifecycle_state": outcome.lifecycle_state,
         "T_raw": outcome.T_raw,

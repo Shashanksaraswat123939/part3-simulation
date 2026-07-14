@@ -39,6 +39,7 @@ from optimizer_contract import (
     GradientWeights,
     OptimizerConfig,
     validate_W,
+    validate_x_front,
 )
 from parallel_runner import TaskFailure, run_candidates_parallel
 from pipeline_interface import PipelineBindings
@@ -80,6 +81,7 @@ def optimize_single_w(
     bindings: PipelineBindings,
     config: OptimizerConfig,
     W_mm: float,
+    x_front_mm: float,
     d_halo_mm: float,
     n_candidates: int,
     out_dir: str,
@@ -91,6 +93,7 @@ def optimize_single_w(
 ) -> WResult:
     """Run the M-candidate evolutionary inner optimization at one W."""
     validate_W(W_mm)
+    validate_x_front(x_front_mm, W_mm)
     if n_candidates < 1:
         raise ValueError("n_candidates must be >= 1")
     if n_evolution_rounds < 1:
@@ -100,10 +103,10 @@ def optimize_single_w(
     population: list[dict] = []
     for i in range(n_candidates):
         if i == 0 and warm_start_grids is not None:
-            grids = bindings.warm_start_phi_fields(warm_start_grids, W_mm, d_halo_mm)
+            grids = bindings.warm_start_phi_fields(warm_start_grids, W_mm, x_front_mm, d_halo_mm)
         else:
             grids = bindings.initialize_phi_fields(
-                W_mm, d_halo_mm, seed=config.random_seed + i
+                W_mm, x_front_mm, d_halo_mm, seed=config.random_seed + i
             )
         population.append(grids)
 
@@ -136,6 +139,7 @@ def optimize_single_w(
                     config=round_config,
                     candidate_id=cid,
                     W_mm=W_mm,
+                    x_front_mm=x_front_mm,
                     d_halo_mm=d_halo_mm,
                     initial_phi_grids=grids,
                     out_dir=out_dir,
@@ -160,7 +164,7 @@ def optimize_single_w(
                 if last is not None and failure_memory is not None:
                     outcome = CandidateOutcome(
                         candidate_id=f"{result.candidate_id}_dead",
-                        W_mm=W_mm, d_halo_mm=d_halo_mm,
+                        W_mm=W_mm, x_front_mm=x_front_mm, d_halo_mm=d_halo_mm,
                         lifecycle_state=last.lifecycle_state,
                         T_raw=None, T_penalized=None,
                         failure_reason=last.failure_reason or "inner loop produced no success",
@@ -201,7 +205,7 @@ def optimize_single_w(
         else:
             population = [
                 bindings.initialize_phi_fields(
-                    W_mm, d_halo_mm,
+                    W_mm, x_front_mm, d_halo_mm,
                     seed=config.random_seed + 5000 * round_idx + i,
                 )
                 for i in range(n_candidates)
@@ -231,6 +235,7 @@ def run_wheelbase_sweep(
     bindings: PipelineBindings,
     config: OptimizerConfig,
     w_values: list[float],
+    x_front_mm: float,
     d_halo_mm: float,
     n_candidates: int,
     out_dir: str,
@@ -243,6 +248,10 @@ def run_wheelbase_sweep(
     The converged φ fields from each W seed candidate 0 of the next W (spec:
     "the converged φ fields from W=N are used to initialize W=N+1"). If a W
     produced no valid candidate, the next W starts fresh.
+
+    x_front_mm and d_halo_mm are fixed for the whole sweep (Level 1 —
+    Part 1's bayesian_outer_search.py — proposes the (W, x_front, d_halo)
+    triple; this sweep executes the W dimension at the proposed x_front/d_halo).
     """
     if not w_values:
         raise ValueError("w_values must not be empty")
@@ -250,7 +259,7 @@ def run_wheelbase_sweep(
     warm: Optional[dict] = None
     for w in sorted(w_values):
         result = optimize_single_w(
-            bindings, config, w, d_halo_mm, n_candidates, out_dir,
+            bindings, config, w, x_front_mm, d_halo_mm, n_candidates, out_dir,
             gradient_weights, warm_start_grids=warm,
             failure_memory=failure_memory,
             n_evolution_rounds=n_evolution_rounds,

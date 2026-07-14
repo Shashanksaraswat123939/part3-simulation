@@ -37,6 +37,29 @@ W_MIN_MM: float = 120.0
 W_MAX_MM: float = 140.0
 COARSE_W_STEP_MM: float = 1.0
 REFINED_W_STEP_MM: float = 0.5
+
+# x_front bounds are W-dependent. Mirrors Part 1's geometry_contract.
+# calibrate_x_front_bounds exactly (cross-check test verifies this) — added
+# as a real outer-loop variable (was previously absent from Part 3 entirely,
+# audit finding P3-2: "zero occurrences of x_front anywhere in
+# part3-simulation" even though Part 1's geometry cannot be built without
+# it). x_front is fixed per sweep run, threaded the same way d_halo_mm
+# already is, not swept independently within Part 3 — Level 1 (Part 1's
+# bayesian_outer_search.py) proposes (W, x_front, d_halo) triples; Part 3
+# executes at the proposed values.
+X_FRONT_MIN_MM: float = 61.0
+X_FRONT_ABS_MAX_MM: float = 90.0
+
+
+def calibrate_x_front_bounds(W_mm: float) -> tuple[float, float]:
+    """Return (x_front_min_mm, x_front_max_mm) for the given wheelbase.
+    Mirrors geometry_contract.calibrate_x_front_bounds byte-for-byte."""
+    x_min = X_FRONT_MIN_MM
+    x_max = min(X_FRONT_ABS_MAX_MM, 207.0 - W_mm)
+    x_max = max(x_max, x_min + 1.0)
+    return x_min, x_max
+
+
 D_HALO_MIN_MM: float = 0.0
 # d_halo upper bound is STRICTLY less than W - 34 mm, derived from the halo
 # pocket placement constraint in Part 1 (halo pocket length 50mm, Ref Plane A
@@ -110,6 +133,20 @@ def validate_W(W_mm: float) -> None:
         raise ValueError(f"W_mm must be a finite number, got {W_mm!r}")
     if not (W_MIN_MM <= W_mm <= W_MAX_MM):
         raise ValueError(f"W_mm={W_mm} outside legal range [{W_MIN_MM}, {W_MAX_MM}] mm")
+
+
+def validate_x_front(x_front_mm: float, W_mm: float) -> None:
+    """Raise ValueError if x_front is outside its W-dependent bounds.
+    Mirrors Part 1's geometry_contract.validate_x_front."""
+    validate_W(W_mm)
+    if not (isinstance(x_front_mm, (int, float)) and math.isfinite(x_front_mm)):
+        raise ValueError(f"x_front_mm must be a finite number, got {x_front_mm!r}")
+    x_min, x_max = calibrate_x_front_bounds(W_mm)
+    if not (x_min <= x_front_mm <= x_max):
+        raise ValueError(
+            f"x_front_mm={x_front_mm} outside legal range [{x_min}, {x_max}] mm "
+            f"for W={W_mm} mm"
+        )
 
 
 def validate_d_halo(d_halo_mm: float, W_mm: float) -> None:
@@ -248,6 +285,7 @@ class CandidateOutcome:
 
     candidate_id: str
     W_mm: float
+    x_front_mm: float
     d_halo_mm: float
     lifecycle_state: str
     T_raw: Optional[float]

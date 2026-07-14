@@ -89,9 +89,9 @@ class PipelineBindings:
 
     Signatures (duck-typed; validate_bindings checks presence/callability):
 
-      initialize_phi_fields(W_mm, d_halo_mm, seed) -> dict[name, phi_grid]
+      initialize_phi_fields(W_mm, x_front_mm, d_halo_mm, seed) -> dict[name, phi_grid]
           Fresh random-legal φ fields for all four components.
-      warm_start_phi_fields(prev_phi_grids, W_mm, d_halo_mm) -> dict
+      warm_start_phi_fields(prev_phi_grids, W_mm, x_front_mm, d_halo_mm) -> dict
           Remap converged fields from a neighboring W (spec: warm-starting).
       perturb_phi_fields(phi_grids, seed, amplitude) -> dict
           Smooth random perturbation of a top candidate (spec: evolutionary).
@@ -171,13 +171,18 @@ def real_bindings(
         from quality_gates import run_quality_gates as p1_run_quality_gates  # noqa: F401
         from mass_com_calculator import compute_all_machined_components
         from phi_updater import update_phi as p1_update_phi
+        from phi_grid_factory import (
+            build_phi_grids_for_candidate,
+            warm_start_phi_grids as warm_start_phi_grids_impl,
+        )
     except ImportError as exc:
         raise ImportError(
             "Part 3 real_bindings requires part1_geometry/ on the path "
-            f"(quality_gates, mass_com_calculator, phi_updater). Cause: {exc}"
+            f"(quality_gates, mass_com_calculator, phi_updater, "
+            f"phi_grid_factory). Cause: {exc}"
         ) from exc
     try:
-        from cfd_wrapper import run_half_car_cfd, CFDRunError  # noqa: F401
+        from cfd_wrapper import run_half_car_cfd, run_half_car_adjoint, CFDRunError  # noqa: F401
         from mass_com_ingest import FixedHardwareSpec, ingest_mass_com
         from race_objective import build_smooth_sheet_model
         from race_objective_adapter import race_value_and_grad_guarded
@@ -202,28 +207,23 @@ def real_bindings(
             dtype=np.float64,
         )
 
-    def initialize_phi_fields(W_mm, d_halo_mm, seed):
-        # ? UNRESOLVED: Part 1 exposes PhiGrid.init(mode="sphere") per grid
-        # but no single factory that builds all four grids for a given
-        # (W, d_halo). When Part 1 lands that factory (bounding_volumes +
-        # fixed_hardware + PhiGrid wiring), call it here. Until then this
-        # binding must be supplied by the caller.
-        raise NotImplementedError(
-            "? UNRESOLVED: Part 1 does not yet expose a build-all-phi-grids "
-            "factory for a given (W_mm, d_halo_mm). Wire it here in "
-            "pipeline_interface.real_bindings.initialize_phi_fields once "
-            "part1_geometry provides it, or inject a custom binding."
+    def initialize_phi_fields(W_mm, x_front_mm, d_halo_mm, seed):
+        phi_grids, _bv = build_phi_grids_for_candidate(
+            W_mm, x_front_mm, d_halo_mm, seed=seed,
         )
+        return phi_grids
 
-    def warm_start_phi_fields(prev_phi_grids, W_mm, d_halo_mm):
-        # ? UNRESOLVED: requires PhiGrid.remap(new_bv, new_hard_masks) plus
-        # recomputed bounding volumes for the new W. Wire once the Part 1
-        # factory above exists.
-        raise NotImplementedError(
-            "? UNRESOLVED: warm-start remap needs Part 1's bounding-volume "
-            "recompute + PhiGrid.remap wiring for the new W. See "
-            "pipeline_interface.real_bindings.warm_start_phi_fields."
+    def warm_start_phi_fields(prev_phi_grids, W_mm, x_front_mm, d_halo_mm):
+        # Scoped-down warm start: rebuilds fresh grids at the new geometry
+        # rather than remapping prev_phi_grids' field values (see
+        # phi_grid_factory.warm_start_phi_grids's docstring — true remap
+        # needs a PhiGrid.remap() that resamples a signed-distance field
+        # across a resized/re-origined grid without corrupting |grad phi|=1,
+        # which does not exist yet and is a separate, nontrivial task).
+        phi_grids, _bv = warm_start_phi_grids_impl(
+            prev_phi_grids, W_mm, x_front_mm, d_halo_mm,
         )
+        return phi_grids
 
     def perturb_phi_fields(phi_grids, seed, amplitude):
         from evolutionary import perturb_phi_array  # local import, no cycle at module load
@@ -279,16 +279,15 @@ def real_bindings(
         return float(compute_adjoint_objective_weight(p, model))
 
     def run_adjoint(stl_half_path, objective_weight):
-        # ? UNRESOLVED: OpenFOAM adjoint solver is not wired anywhere in the
-        # project yet (Part 2 build report: cfd_wrapper pipeline placeholder).
-        # This must run the adjoint case with Objective = w_D20 × D20 and
-        # return the right-half surface sensitivity field.
-        raise NotImplementedError(
-            "? UNRESOLVED: OpenFOAM adjoint is not wired. run_adjoint must "
-            "execute the adjoint case for the half-car STL and return "
-            "dObjective/dSurface on the right-half mesh. See Part 2's "
-            "cfd_wrapper placeholder and the Adjoint Objective Contract."
-        )
+        # Runs the ESI adjointOptimisationFoam case (see Part 2's
+        # openfoam_adjoint.py) and returns dObjective/dSurface on the
+        # right-half mesh, one scalar per vertex in the same order as
+        # trimesh.load(stl_half_path).vertices -- exactly what p1_update_phi
+        # (phi_updater.apply_adjoint_sensitivity_symmetric) requires as
+        # right_half_sensitivity. objective_weight (w_D20, from
+        # compute_adjoint_weight) and the project's ADJOINT_HALF_CAR_SCALING
+        # are applied inside run_half_car_adjoint.
+        return run_half_car_adjoint(stl_half_path, objective_weight)
 
     def update_phi(phi_grids, sensitivity_field, meshes, dt, weights,
                    objective_gradients, mass_report):

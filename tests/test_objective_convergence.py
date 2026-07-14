@@ -25,6 +25,7 @@ def candidate(candidate_id, raw, penalized, state="valid_simulated", reason=None
     return CandidateOutcome(
         candidate_id=candidate_id,
         W_mm=130.0,
+        x_front_mm=64.0,
         d_halo_mm=40.0,
         lifecycle_state=state,
         T_raw=raw,

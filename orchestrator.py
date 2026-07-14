@@ -71,6 +71,7 @@ class SearchResult:
         c = self.build_candidate
         return {
             "optimal_W_mm": c.W_mm,
+            "optimal_x_front_mm": c.x_front_mm,
             "optimal_d_halo_mm": c.d_halo_mm,
             "converged_phi_snapshot_paths": dict(c.phi_snapshot_paths),
             "predicted_T_raw_s": c.T_raw,
@@ -89,6 +90,7 @@ class SearchResult:
 def run_full_search(
     bindings: PipelineBindings,
     config: OptimizerConfig,
+    x_front_mm: float,
     d_halo_mm: float,
     out_dir: str,
     gradient_weights: GradientWeights,
@@ -101,6 +103,9 @@ def run_full_search(
     Args:
         bindings: pipeline handshake.
         config: optimizer config; BOTH prerequisite flags must be True.
+        x_front_mm: nose length / front axle position, fixed for this search
+            (validated per-W inside the loops). Proposed by Level 1
+            (Part 1's bayesian_outer_search.py) in the three-level structure.
         d_halo_mm: halo distance (validated per-W inside the loops).
         out_dir: candidate records root.
         gradient_weights: from gradient_combiner.calibrate_gradient_weights.
@@ -135,7 +140,7 @@ def run_full_search(
 
     # Step 3: coarse sweep.
     coarse = run_wheelbase_sweep(
-        bindings, config, coarse_w_values(), d_halo_mm,
+        bindings, config, coarse_w_values(), x_front_mm, d_halo_mm,
         n_candidates=config.coarse_candidates_per_w,
         out_dir=out_dir, gradient_weights=gradient_weights,
         failure_memory=failure_memory, n_evolution_rounds=n_evolution_rounds,
@@ -153,7 +158,7 @@ def run_full_search(
     if top_ws:
         # Step 5: refined sweep at 0.5 mm around the top W values.
         refined = run_wheelbase_sweep(
-            bindings, config, refined_w_values(top_ws), d_halo_mm,
+            bindings, config, refined_w_values(top_ws), x_front_mm, d_halo_mm,
             n_candidates=config.refined_candidates_per_w,
             out_dir=out_dir, gradient_weights=gradient_weights,
             failure_memory=failure_memory, n_evolution_rounds=n_evolution_rounds,

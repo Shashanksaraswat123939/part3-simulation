@@ -139,6 +139,7 @@ def perturb_phi_array(
 @dataclass
 class FailureRecord:
     W_mm: float
+    x_front_mm: float
     d_halo_mm: float
     lifecycle_state: str
     failure_reason: str
@@ -174,6 +175,7 @@ class FailureRegionMemory:
         self._records.append(
             FailureRecord(
                 W_mm=outcome.W_mm,
+                x_front_mm=outcome.x_front_mm,
                 d_halo_mm=outcome.d_halo_mm,
                 lifecycle_state=outcome.lifecycle_state,
                 failure_reason=outcome.failure_reason,
@@ -181,17 +183,18 @@ class FailureRegionMemory:
             )
         )
 
-    def failures_near(self, W_mm: float, d_halo_mm: float) -> list[FailureRecord]:
+    def failures_near(self, W_mm: float, x_front_mm: float, d_halo_mm: float) -> list[FailureRecord]:
         return [
             r for r in self._records
             if abs(r.W_mm - W_mm) <= self._radius
+            and abs(r.x_front_mm - x_front_mm) <= self._radius
             and abs(r.d_halo_mm - d_halo_mm) <= self._radius
         ]
 
-    def is_blacklisted(self, W_mm: float, d_halo_mm: float) -> bool:
+    def is_blacklisted(self, W_mm: float, x_front_mm: float, d_halo_mm: float) -> bool:
         """True when >= kill_threshold failures cluster within region_radius
         of the query point — the outer loop should seed elsewhere."""
-        return len(self.failures_near(W_mm, d_halo_mm)) >= self._threshold
+        return len(self.failures_near(W_mm, x_front_mm, d_halo_mm)) >= self._threshold
 
     @property
     def records(self) -> list[FailureRecord]:

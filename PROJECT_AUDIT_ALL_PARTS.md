@@ -1,5 +1,16 @@
 # STEM Racing CFD Optimization — Full Project Audit (Parts 1–3)
 
+> **⚠️ DATED 2026-07-12 — several findings are now resolved or superseded (banner
+> added 2026-07-24). Read `../ARCHITECTURE.md` for the current state.** Notably:
+> finding **N-20 ("no frontal-area computation exists anywhere")** is false —
+> `compute_frontal_area_half` exists. The audit also predates: the two-stage
+> architecture (Stage 1 no-CFD Bayesian over W+x_front; Stage 2 per-`d_halo`
+> CFD sweep), the corrected `d_halo < W-34` bound, the virtual-cargo fore-aft
+> flip, and the mandatory ballast-container void. It still describes the outer
+> loop as a single 3-scalar BO with nested adjoint. Part 2's CFD/adjoint wrappers
+> are now REAL (not the stubs some sections describe). See
+> `../SESSION_CHANGES_2026-07-24.md`.
+
 **Date:** 2026-07-12
 **Scope:** Part 1 (generative geometry, under work), Part 2 (simulation setups, completed), Part 3 (optimizer, built in this session), and every interface between them.
 **Method:** Static review of all retrievable source against the three governing MD specs and the Part 1 SPEC.txt interface contract (§16) and signature reference (§22). Where a finding was quantifiable, I reproduced it numerically in an isolated Python environment rather than trusting inspection — those findings carry reproduction numbers. Part 3 was built and its 24 tests executed to green in this session; its audit section is a self-audit and is deliberately the harshest.

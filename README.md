@@ -1,5 +1,11 @@
 # Part 3 Simulation - Optimizer Workflow
 
+> 📐 **Whole-project architecture:** see [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+> Part 3 owns orchestration: the `PipelineBindings` handshake, the per-candidate
+> inner φ loop (forward CFD + adjoint + Hamilton-Jacobi update), the outer sweep,
+> and candidate records. ⚠️ The outer sweep currently sweeps **W** (grid); the
+> target two-stage flow sweeps **d_halo** (see ARCHITECTURE.md §8).
+
 This repository contains the Part 3 optimizer layer for the STEM Racing CFD workflow. It is designed to sit beside:
 
 - `part1-simulation`: generative geometry, level-set fields, quality gates, STL export, mass/COM extraction.

@@ -47,8 +47,16 @@ REFINED_W_STEP_MM: float = 0.5
 # already is, not swept independently within Part 3 — Level 1 (Part 1's
 # bayesian_outer_search.py) proposes (W, x_front, d_halo) triples; Part 3
 # executes at the proposed values.
-X_FRONT_MIN_MM: float = 61.0
-X_FRONT_ABS_MAX_MM: float = 90.0
+#
+# Values updated 2026-07-20 in lockstep with Part 1. The old pair (61.0, 90.0)
+# derived its floor from "the nose must fit the CO2 cartridge depth", which is
+# false — the cartridge chamber is rear of Ref Plane A, not in the nose. Worse,
+# that floor forced a nose overhang of >= 45 mm against T8.2's 40 mm maximum,
+# so every candidate Part 3 accepted was illegal. The ceiling is now T8.2
+# directly: nose overhang = x_front - 16 <= 40  ->  x_front <= 56.
+# See geometry_contract.X_FRONT_MIN_MM for the full derivation and regs cites.
+X_FRONT_MIN_MM: float = 36.0   # 16 mm Ref Plane A offset + 20 mm design min nose
+X_FRONT_ABS_MAX_MM: float = 56.0   # 16 mm Ref Plane A offset + T8.2's 40 mm max
 
 
 def calibrate_x_front_bounds(W_mm: float) -> tuple[float, float]:

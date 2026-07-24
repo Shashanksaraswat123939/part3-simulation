@@ -318,9 +318,14 @@ def _run_single_iteration(
             x_com=mass_report.com_x_m,
             mu=config.mu, wheel_moi=config.wheel_moi_kg_m2,
         )
-        sensitivity = bindings.run_adjoint(gate.stl_half_path, w_D20)
+        # run_adjoint returns the sensitivity together with the half-car mesh
+        # that defines its vertex ordering (AdjointOutcome). Passing
+        # gate.meshes here instead -- a dict[str, Trimesh] with no .vertices --
+        # is what silently broke every phi update; see AdjointOutcome's
+        # docstring.
+        adjoint = bindings.run_adjoint(gate.stl_half_path, w_D20)
         bindings.update_phi(
-            phi_grids, sensitivity, gate.meshes, config.hj_dt,
+            phi_grids, adjoint.sensitivity, adjoint.half_mesh, config.hj_dt,
             gradient_weights, objective.gradients, mass_report,
         )
     except Exception as exc:  # noqa: BLE001

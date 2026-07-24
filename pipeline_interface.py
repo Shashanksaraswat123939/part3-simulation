@@ -80,6 +80,29 @@ class MassReport:
     com_z_m: float
 
 
+@dataclass(frozen=True)
+class AdjointOutcome:
+    """One adjoint solve: the surface sensitivity AND the mesh indexing it.
+
+    These two are inseparable and must travel together. `sensitivity[i]` is
+    dObjective/dSurface at `half_mesh.vertices[i]`; the array alone carries no
+    information about which point each value belongs to.
+
+    Keeping them apart produced the pipeline's longest-lived silent failure:
+    inner_loop had only the sensitivity, so it reached for the nearest
+    mesh-shaped object in scope -- `gate.meshes`, a dict[str, Trimesh] keyed by
+    component. A dict has no `.vertices`, so the phi update raised
+    AttributeError on the first real iteration, the loop's broad `except`
+    caught it, and every iteration was quietly downgraded to
+    "objective_failed" with phi never updated once.
+
+    half_mesh may be None only for test doubles whose update_phi ignores it.
+    """
+
+    sensitivity: Any
+    half_mesh: Any
+
+
 @dataclass
 class PipelineBindings:
     """Every callable Part 3 needs from the rest of the system.
@@ -103,9 +126,10 @@ class PipelineBindings:
       evaluate_objective(D20, L, m_total, h_com, x_com, mu, wheel_moi) ->
           ObjectiveOutcome
       compute_adjoint_weight(...same args...) -> float          (w_D20, s/N)
-      run_adjoint(stl_half_path, objective_weight) -> sensitivity_field
-          Right-half surface sensitivity dObjective/dSurface.
-      update_phi(phi_grids, sensitivity_field, meshes, dt, weights,
+      run_adjoint(stl_half_path, objective_weight) -> AdjointOutcome
+          Right-half surface sensitivity dObjective/dSurface, together with
+          the half-car mesh that defines its vertex ordering.
+      update_phi(phi_grids, sensitivity_field, half_mesh, dt, weights,
                  objective_gradients, mass_report) -> None (in place)
       write_candidate_record(outcome_dict) -> record_path (str)
     """
@@ -287,14 +311,40 @@ def real_bindings(
         # right_half_sensitivity. objective_weight (w_D20, from
         # compute_adjoint_weight) and the project's ADJOINT_HALF_CAR_SCALING
         # are applied inside run_half_car_adjoint.
-        return run_half_car_adjoint(stl_half_path, objective_weight)
+        #
+        # The mesh is loaded HERE, beside the solve that defines the ordering,
+        # so the sensitivity can never be paired with the wrong geometry
+        # downstream. process=False keeps trimesh from merging or reordering
+        # vertices, which would silently break the index alignment.
+        import trimesh
 
-    def update_phi(phi_grids, sensitivity_field, meshes, dt, weights,
+        sensitivity = run_half_car_adjoint(stl_half_path, objective_weight)
+        half_mesh = trimesh.load(stl_half_path, process=False)
+        n_v, n_s = len(half_mesh.vertices), len(sensitivity)
+        if n_v != n_s:
+            raise ValueError(
+                f"adjoint returned {n_s} sensitivities but {stl_half_path} has "
+                f"{n_v} vertices; they must be index-aligned."
+            )
+        return AdjointOutcome(sensitivity=sensitivity, half_mesh=half_mesh)
+
+    def update_phi(phi_grids, sensitivity_field, half_mesh, dt, weights,
                    objective_gradients, mass_report):
+        # `half_mesh` MUST be the half-car STL mesh, not Part 1's per-component
+        # mesh dict. run_adjoint returns one scalar per vertex of
+        # trimesh.load(stl_half_path).vertices, and p1_update_phi pairs
+        # sensitivity[i] with right_half_mesh.vertices[i] -- so the mesh handed
+        # over has to be that exact object or the pairing is meaningless.
+        #
+        # This used to receive gate.meshes, a dict[str, Trimesh]. A dict has no
+        # .vertices, so the very first real iteration raised AttributeError,
+        # which inner_loop caught broadly and downgraded to "objective_failed".
+        # The loop therefore never updated phi and never crashed loudly enough
+        # to be noticed.
         p1_update_phi(
             phi_grids,
             right_half_sensitivity=sensitivity_field,
-            right_half_mesh=meshes,
+            right_half_mesh=half_mesh,
             dt=dt,
             gradient_weights={
                 "w_aero": weights.w_aero,
@@ -302,6 +352,10 @@ def real_bindings(
                 "w_com": weights.w_com,
                 "w_mfg": weights.w_mfg,
             },
+            # Previously accepted and then discarded, which zeroed the mass and
+            # COM gradient channels no matter how w_mass/w_com were calibrated.
+            objective_gradients=objective_gradients,
+            mass_report=mass_report,
         )
 
     def write_record(outcome: dict) -> str:
@@ -320,6 +374,170 @@ def real_bindings(
         run_adjoint=run_adjoint,
         update_phi=update_phi,
         write_candidate_record=write_record,
+    )
+    validate_bindings(bindings)
+    return bindings
+
+
+def unified_bindings(
+    thrust_csv_path: str,
+    fixed_hardware_kwargs: dict,
+    out_dir: str,
+) -> PipelineBindings:
+    """Bind Part 3 to the UNIFIED single-field geometry + the real objective.
+
+    Same CFD / race-objective / adjoint bindings as real_bindings, but the
+    geometry pipeline is the single labelled level set (unified_phi), not the
+    four-grid path. That fixes what the four-grid path could not:
+
+      * geometry is ONE connected watertight body, so the quality gate passes
+        (the four-grid path fails on tool accessibility and disconnected slabs);
+      * the drag adjoint and the real objective gradients evolve one field, so
+        material can move across former component seams;
+      * `phi_grids` handed around the inner loop is a UnifiedGeometry object
+        (the loop treats it opaquely, so this is contract-compatible).
+
+    The only thing still stubbed after this is the OpenFOAM binary: run_cfd /
+    run_adjoint shell out to it exactly as in real_bindings.
+    """
+    _add_sibling_packages_to_path()
+
+    try:
+        from unified_phi import (
+            build_unified_geometry, enforce_symmetry, extract_unified_surface,
+            compute_mass_com, extract_half_surface,
+        )
+        from phi_updater import apply_adjoint_to_unified
+    except ImportError as exc:
+        raise ImportError(
+            "unified_bindings requires part1 unified_phi + phi_updater. "
+            f"Cause: {exc}"
+        ) from exc
+    try:
+        from cfd_wrapper import run_half_car_cfd, run_half_car_adjoint  # noqa: F401
+        from mass_com_ingest import FixedHardwareSpec, ingest_mass_com
+        from race_objective import build_smooth_sheet_model
+        from race_objective_adapter import race_value_and_grad_guarded
+        from adjoint_contract import compute_adjoint_objective_weight
+        from candidate_record import CandidateRecord, write_candidate_record
+        import numpy as np
+    except ImportError as exc:
+        raise ImportError(
+            f"unified_bindings requires part2_simulation/ on the path. Cause: {exc}"
+        ) from exc
+
+    fixed_hardware = FixedHardwareSpec(**fixed_hardware_kwargs)
+    model = build_smooth_sheet_model(thrust_csv_path)
+    _COMPONENT_KEYS = ("nose", "sidepod", "rearpod", "main_body")
+
+    def _params(D20, L, m_total, h_com, x_com, mu, wheel_moi):
+        return np.array([D20, m_total, mu, wheel_moi, 1.0, h_com, L, x_com],
+                        dtype=np.float64)
+
+    def initialize_phi_fields(W_mm, x_front_mm, d_halo_mm, seed):
+        geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm,
+                                      init_mode="full", seed=seed)
+        enforce_symmetry(geom)
+        return geom
+
+    def warm_start_phi_fields(prev_geom, W_mm, x_front_mm, d_halo_mm):
+        # Rebuild fresh at the new geometry (documented scope-down; a true φ
+        # remap across a resized envelope is a separate task, same caveat the
+        # four-grid warm_start_phi_fields carries).
+        geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm, init_mode="full")
+        enforce_symmetry(geom)
+        return geom
+
+    def perturb_phi_fields(geom, seed, amplitude):
+        from evolutionary import perturb_phi_array
+        geom.phi.grid = perturb_phi_array(geom.phi.grid, seed=seed, amplitude=amplitude)
+        geom.phi.apply_hard_constraints()
+        enforce_symmetry(geom)
+        return geom
+
+    def run_quality_gates(geom, candidate_id, run_out_dir):
+        os.makedirs(run_out_dir, exist_ok=True)
+        try:
+            mesh, report = extract_unified_surface(geom, allow_inaccessible=True)
+        except Exception as exc:  # noqa: BLE001
+            return GateOutcome(
+                lifecycle_state="geometry_rejected", phi_snapshot_paths={},
+                stl_path=None, stl_half_path=None,
+                failure_reason=f"unified extraction failed: {exc}", meshes=None,
+            )
+        stl_path = os.path.join(run_out_dir, f"{candidate_id}_full.stl")
+        stl_half = os.path.join(run_out_dir, f"{candidate_id}_half.stl")
+        mesh.export(stl_path, file_type="stl_ascii")
+        extract_half_surface(geom).export(stl_half, file_type="stl_ascii")
+        snap = geom.phi.save(candidate_id, run_out_dir)
+        # The record contract wants the four component keys; the unified field
+        # is one file, so all four point at it (single-field snapshot).
+        snaps = {k: snap for k in _COMPONENT_KEYS}
+        # allow_inaccessible carries a manufacturing penalty rather than
+        # rejecting -> a repaired-but-valid candidate, per the spec's failure
+        # table (large accessibility failure = penalty, continue).
+        state = "geometry_repaired" if report["inaccessible_area_mm2"] else "valid_simulated"
+        return GateOutcome(
+            lifecycle_state=state, phi_snapshot_paths=snaps,
+            stl_path=stl_path, stl_half_path=stl_half,
+            failure_reason=None, meshes={"car": mesh},
+        )
+
+    def compute_mass_report(geom):
+        machined = compute_mass_com(geom)
+        full = ingest_mass_com(machined, fixed_hardware)
+        return MassReport(
+            total_mass_kg=full.total_mass_kg, com_x_m=full.com_x_m,
+            com_y_m=full.com_y_m, com_z_m=full.com_z_m,
+        )
+
+    def run_cfd(stl_half_path):
+        half, health = run_half_car_cfd(stl_half_path)
+        full = half.to_full_car()
+        return CFDOutcome(D20=full.D20, L=full.L, Cm=full.Cm, A=full.A,
+                          converged=health.converged, residual_final=health.residual_final)
+
+    def evaluate_objective(D20, L, m_total, h_com, x_com, mu, wheel_moi):
+        p = _params(D20, L, m_total, h_com, x_com, mu, wheel_moi)
+        T_raw, T_pen, grads = race_value_and_grad_guarded(p, model)
+        return ObjectiveOutcome(T_raw=T_raw, T_com_penalized=T_pen, gradients=grads)
+
+    def compute_adjoint_weight(D20, L, m_total, h_com, x_com, mu, wheel_moi):
+        p = _params(D20, L, m_total, h_com, x_com, mu, wheel_moi)
+        return float(compute_adjoint_objective_weight(p, model))
+
+    def run_adjoint(stl_half_path, objective_weight):
+        import trimesh
+        sensitivity = run_half_car_adjoint(stl_half_path, objective_weight)
+        half_mesh = trimesh.load(stl_half_path, process=False)
+        if len(half_mesh.vertices) != len(sensitivity):
+            raise ValueError(
+                f"adjoint returned {len(sensitivity)} sensitivities but "
+                f"{stl_half_path} has {len(half_mesh.vertices)} vertices."
+            )
+        return AdjointOutcome(sensitivity=sensitivity, half_mesh=half_mesh)
+
+    def update_phi(geom, sensitivity_field, half_mesh, dt, weights,
+                   objective_gradients, mass_report):
+        apply_adjoint_to_unified(
+            geom, sensitivity_field, half_mesh, dt,
+            {"w_aero": weights.w_aero, "w_mass": weights.w_mass,
+             "w_com": weights.w_com, "w_mfg": weights.w_mfg},
+            objective_gradients, mass_report,
+        )
+
+    def write_record(outcome: dict) -> str:
+        return write_candidate_record(CandidateRecord(**outcome), out_dir)
+
+    bindings = PipelineBindings(
+        initialize_phi_fields=initialize_phi_fields,
+        warm_start_phi_fields=warm_start_phi_fields,
+        perturb_phi_fields=perturb_phi_fields,
+        run_quality_gates=run_quality_gates,
+        compute_mass_report=compute_mass_report,
+        run_cfd=run_cfd, evaluate_objective=evaluate_objective,
+        compute_adjoint_weight=compute_adjoint_weight, run_adjoint=run_adjoint,
+        update_phi=update_phi, write_candidate_record=write_record,
     )
     validate_bindings(bindings)
     return bindings

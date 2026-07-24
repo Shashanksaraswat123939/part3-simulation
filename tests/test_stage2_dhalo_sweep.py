@@ -208,6 +208,79 @@ def test_ground_plane_sits_on_the_track_with_a_rolling_road():
         assert "searchableBox" in snappy
 
 
+def test_stage1_cargo_placement_reaches_the_built_geometry():
+    """Stage 1's scored cargo choice must survive into every Stage-2 car.
+
+    It did not: scalars_for_stage2() emitted cargo_x_start_m/cargo_flip, nothing
+    downstream read them, and unified_bindings called build_unified_geometry
+    without cargo_placement — so each Stage-2 car reverted to the geometric
+    default and the fore-aft flip DOF was dead. Checked by building the SAME
+    scalars with flip=False and flip=True and requiring the solid masks to
+    differ; if the placement were being dropped, both builds would be identical.
+    """
+    import numpy as np
+    import unified_phi as up
+    from stage1_search import Stage1Point, Stage1Result
+
+    import coarse
+    coarse.use_spacing(3.0)
+
+    W, xf, dh = 130.0, 46.0, 20.0
+    base = up.build_unified_geometry(W, xf, dh, init_mode="full", seed=0)
+    z_base = max(base.region.origin_m[2], 0.0025)
+    x_start = 0.107
+
+    # Two different x positions must produce different solid masks. If
+    # cargo_placement were being dropped (the bug), both builds would fall back
+    # to the geometric default and be byte-identical.
+    masks = {}
+    for xs in (x_start, x_start - 0.012):
+        g = up.build_unified_geometry(
+            W, xf, dh, init_mode="full", seed=0,
+            cargo_placement={"x_start_m": xs, "z_base_m": z_base, "flip": False},
+        )
+        masks[xs] = g.phi.hard_mask_solid.copy()
+    a, b = list(masks.values())
+    assert not np.array_equal(a, b), (
+        "two different cargo x positions produced identical solid masks — "
+        "cargo_placement is being ignored by build_unified_geometry"
+    )
+
+    # And the erosion guard must REJECT a colliding placement rather than let
+    # `hard_solid &= ~hard_air` delete it. Measured for real: at these scalars,
+    # flip=True puts the wedge's wide 55 mm end at x=156..165 mm against a rear
+    # axle at 176 mm and loses 17.8% of the mandatory T4.2 volume, while
+    # flip=False at the same x_start loses none. find_cargo_placement screens
+    # only the halo pocket, so nothing upstream catches this.
+    try:
+        up.build_unified_geometry(
+            W, xf, dh, init_mode="full", seed=0,
+            cargo_placement={"x_start_m": x_start, "z_base_m": z_base, "flip": True},
+        )
+    except ValueError as exc:
+        assert "cargo" in str(exc).lower(), exc
+    else:
+        raise AssertionError(
+            "flip=True at this placement erodes the mandatory cargo but was "
+            "accepted — the CARGO_MAX_ERODED_FRACTION guard is not firing"
+        )
+
+    # And the handoff dict must be shaped for build_unified_geometry directly.
+    # flip=False here: flip=True at these scalars is the colliding case asserted
+    # above, and this check is about the SHAPE of the handoff dict, not placement
+    # legality.
+    pt = Stage1Point(W_mm=W, x_front_mm=xf, d_halo_mm=dh, T_proxy=1.0,
+                     mass_kg=0.05, com_x_m=0.1, com_z_m=0.02,
+                     cargo_x_start_m=x_start, cargo_flip=False, cargo_z_base_m=z_base)
+    handoff = Stage1Result(best=pt).scalars_for_stage2()
+    placement = handoff["cargo_placement"]
+    assert set(placement) == {"x_start_m", "z_base_m", "flip"}, placement
+    assert placement["flip"] is False and placement["z_base_m"] == z_base
+    # Must be accepted verbatim by build_unified_geometry.
+    up.build_unified_geometry(W, xf, dh, init_mode="full", seed=0,
+                              cargo_placement=placement)
+
+
 def _write_tetra(path: Path) -> None:
     v = [(0, 0, 0.002), (0.01, 0, 0.002), (0, 0.01, 0.002), (0, 0, 0.012)]
     tris = [(0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)]
@@ -229,6 +302,7 @@ if __name__ == "__main__":
         test_iteration_budget_is_not_silently_discarded,
         test_ground_plane_sits_on_the_track_with_a_rolling_road,
         test_cfd_stl_is_under_budget_and_still_meets_part2_contract,
+        test_stage1_cargo_placement_reaches_the_built_geometry,
     ):
         _run(t)
     print(f"\n{_passed} passed, {_failed} failed")

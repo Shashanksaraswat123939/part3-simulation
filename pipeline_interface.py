@@ -459,6 +459,7 @@ def unified_bindings(
     cfd_kwargs: Optional[dict] = None,
     adjoint_kwargs: Optional[dict] = None,
     stl_triangle_budget: int = STL_TRIANGLE_BUDGET,
+    cargo_placement: Optional[dict] = None,
 ) -> PipelineBindings:
     """Bind Part 3 to the UNIFIED single-field geometry + the real objective.
 
@@ -523,9 +524,17 @@ def unified_bindings(
         return np.array([D20, m_total, mu, wheel_moi, 1.0, h_com, L, x_com],
                         dtype=np.float64)
 
+    # Stage 1 scores cargo position AND fore-aft flip against the real
+    # com_x-aware race objective (stage1_search.make_race_objective_cargo_scorer)
+    # — the proxy cannot rank cargo because it has no com_x term. That choice
+    # only means something if Stage 2 BUILDS with it. Before this was threaded
+    # through, build_unified_geometry was called without cargo_placement, so
+    # every Stage-2 car silently reverted to the geometric default
+    # (corridor-centre, wide-forward) and the flip DOF was dead.
     def initialize_phi_fields(W_mm, x_front_mm, d_halo_mm, seed):
         geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm,
-                                      init_mode="full", seed=seed)
+                                      init_mode="full", seed=seed,
+                                      cargo_placement=cargo_placement)
         enforce_symmetry(geom)
         return geom
 
@@ -533,7 +542,9 @@ def unified_bindings(
         # Rebuild fresh at the new geometry (documented scope-down; a true φ
         # remap across a resized envelope is a separate task, same caveat the
         # four-grid warm_start_phi_fields carries).
-        geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm, init_mode="full")
+        geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm,
+                                      init_mode="full",
+                                      cargo_placement=cargo_placement)
         enforce_symmetry(geom)
         return geom
 

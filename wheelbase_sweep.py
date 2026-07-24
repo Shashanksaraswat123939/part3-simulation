@@ -32,6 +32,8 @@ from inner_loop import run_inner_loop, InnerLoopResult
 from objective_policy import final_ranking
 from optimizer_contract import (
     COARSE_W_STEP_MM,
+    D_HALO_MIN_MM,
+    D_HALO_PLACEMENT_MARGIN_MM,
     REFINED_W_STEP_MM,
     W_MAX_MM,
     W_MIN_MM,
@@ -49,6 +51,50 @@ def coarse_w_values() -> list[float]:
     """120..140 mm inclusive at 1 mm steps — exactly 21 values."""
     n = int(round((W_MAX_MM - W_MIN_MM) / COARSE_W_STEP_MM)) + 1
     return [W_MIN_MM + i * COARSE_W_STEP_MM for i in range(n)]
+
+
+def d_halo_values(W_mm: float, n: int = 6) -> list[float]:
+    """`n` legal halo positions for a fixed wheelbase: [0, W-34) mm, exclusive.
+
+    This is the Stage-2 sweep variable in the two-stage architecture
+    (ARCHITECTURE.md §4): W and x_front are frozen by Stage 1's no-CFD Bayesian
+    search, and each d_halo becomes a SEPARATE CAR run through the full inner
+    φ loop, ranked by real race time. d_halo's payoff is aerodynamic (the
+    halo→canister loft), which is exactly why it needs CFD per value and W
+    does not.
+
+    The upper bound is strict (`< W-34`), so the top sample is pulled just
+    inside it rather than sitting on the excluded endpoint.
+    """
+    validate_W(W_mm)
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    upper = W_mm - D_HALO_PLACEMENT_MARGIN_MM
+    if upper <= D_HALO_MIN_MM:
+        raise ValueError(
+            f"W={W_mm} mm leaves no legal d_halo range (upper bound {upper} mm)"
+        )
+    if n == 1:
+        return [D_HALO_MIN_MM]
+    span = upper - D_HALO_MIN_MM
+    # Last sample at 99% of the span keeps it strictly below the exclusive bound.
+    return [round(D_HALO_MIN_MM + span * 0.99 * i / (n - 1), 6) for i in range(n)]
+
+
+def refined_d_halo_values(top_d_halos: list[float], W_mm: float,
+                          window_mm: float = 4.0, n_per: int = 3) -> list[float]:
+    """Refinement grid around the best d_halo values, clamped to [0, W-34)."""
+    validate_W(W_mm)
+    if not top_d_halos:
+        raise ValueError("top_d_halos must not be empty")
+    upper = W_mm - D_HALO_PLACEMENT_MARGIN_MM
+    values = set()
+    for d in top_d_halos:
+        for k in range(-(n_per // 2), n_per // 2 + 1):
+            candidate = d + k * (window_mm / max(n_per - 1, 1))
+            if D_HALO_MIN_MM <= candidate < upper:
+                values.add(round(candidate, 6))
+    return sorted(values)
 
 
 def refined_w_values(top_ws: list[float], step_mm: float = REFINED_W_STEP_MM) -> list[float]:
@@ -115,7 +161,12 @@ def optimize_single_w(
         cfd_pipeline_validated_on_known_geometry=config.cfd_pipeline_validated_on_known_geometry,
         mu=config.mu,
         wheel_moi_kg_m2=config.wheel_moi_kg_m2,
-        iteration_budget=config.evolution_interval_iters,
+        # Per-round slice = min(evolution_interval_iters, iteration_budget).
+        # It used to be evolution_interval_iters unconditionally, which silently
+        # discarded config.iteration_budget — so run_optimization.py's
+        # --iteration-budget flag did nothing at all, and a caller asking for a
+        # 1-iteration smoke run still got 10.
+        iteration_budget=min(config.evolution_interval_iters, config.iteration_budget),
         gradient_norm_threshold=config.gradient_norm_threshold,
         evolution_interval_iters=config.evolution_interval_iters,
         hj_dt=config.hj_dt,
@@ -263,6 +314,52 @@ def run_wheelbase_sweep(
             gradient_weights, warm_start_grids=warm,
             failure_memory=failure_memory,
             n_evolution_rounds=n_evolution_rounds,
+        )
+        results.append(result)
+        warm = result.best_phi_grids if result.best is not None else None
+    return results
+
+
+def run_d_halo_sweep(
+    bindings: PipelineBindings,
+    config: OptimizerConfig,
+    d_halo_list: list[float],
+    W_mm: float,
+    x_front_mm: float,
+    n_candidates: int,
+    out_dir: str,
+    gradient_weights: GradientWeights,
+    failure_memory: Optional[FailureRegionMemory] = None,
+    n_evolution_rounds: int = 3,
+) -> list[WResult]:
+    """Stage 2 of the two-stage architecture: sweep d_halo at FIXED W/x_front.
+
+    ARCHITECTURE.md §4: "a separate car for each halo-canister distance, best
+    race time wins". W and x_front come from Stage 1's no-CFD Bayesian search
+    (part1-simulation/stage1_search.py) and are never reopened here.
+
+    Deliberately reuses `optimize_single_w` unchanged — that function was
+    already parameterised by all three scalars and only ever varied one, so the
+    difference between the two sweeps is which one the outer loop steps. The
+    returned WResult still carries `W_mm` (constant across this sweep); read
+    `best.d_halo_mm` for the swept variable.
+
+    Warm-starting carries φ from one halo position to the next, same as the W
+    sweep — adjacent d_halo cars differ only in where the pocket sits.
+    """
+    if not d_halo_list:
+        raise ValueError("d_halo_list must not be empty")
+    validate_W(W_mm)
+    validate_x_front(x_front_mm, W_mm)
+    results: list[WResult] = []
+    warm: Optional[dict] = None
+    for d in sorted(d_halo_list):
+        result = optimize_single_w(
+            bindings, config, W_mm, x_front_mm, d, n_candidates, out_dir,
+            gradient_weights, warm_start_grids=warm,
+            failure_memory=failure_memory,
+            n_evolution_rounds=n_evolution_rounds,
+            candidate_prefix=f"dhalo{d:g}",
         )
         results.append(result)
         warm = result.best_phi_grids if result.best is not None else None

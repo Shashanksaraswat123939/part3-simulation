@@ -40,7 +40,10 @@ from robustness import RobustnessReport
 from wheelbase_sweep import (
     WResult,
     coarse_w_values,
+    d_halo_values,
+    refined_d_halo_values,
     refined_w_values,
+    run_d_halo_sweep,
     run_wheelbase_sweep,
 )
 
@@ -87,6 +90,99 @@ class SearchResult:
         }
 
 
+def _require_prerequisites(config: OptimizerConfig) -> None:
+    """The spec's steps 1-2 gate. Shared by both search entry points so a new
+    entry point cannot accidentally skip it."""
+    if not config.rtc_validated_against_track_data:
+        raise PrerequisitesNotMet(
+            "Search Strategy step 1 unmet: RTC has not been validated "
+            "against real track data (config.rtc_validated_against_track_data "
+            "is False). Run the physical validation first."
+        )
+    if not config.cfd_pipeline_validated_on_known_geometry:
+        raise PrerequisitesNotMet(
+            "Search Strategy step 2 unmet: CFD pipeline has not been "
+            "validated on a known geometry "
+            "(config.cfd_pipeline_validated_on_known_geometry is False)."
+        )
+
+
+def run_stage2_dhalo_search(
+    bindings: PipelineBindings,
+    config: OptimizerConfig,
+    W_mm: float,
+    x_front_mm: float,
+    out_dir: str,
+    gradient_weights: GradientWeights,
+    n_d_halo: int = 6,
+    robustness_runner: Optional[Callable[[CandidateOutcome], RobustnessReport]] = None,
+    n_evolution_rounds: int = 3,
+    n_finalists_for_robustness: int = 3,
+    refine: bool = True,
+) -> SearchResult:
+    """Stage 2 of the two-stage architecture: sweep d_halo at FIXED W/x_front.
+
+    This is the search `ARCHITECTURE.md` §4 actually describes, and the one
+    `run_full_search` (below) is NOT: that one sweeps W, a leftover from before
+    the two-stage split, and re-decides with expensive CFD a scalar Stage 1
+    already chose cheaply from mass/COM. Use this for the two-stage flow; W and
+    x_front arrive frozen from `part1-simulation/stage1_search.py`.
+
+    Cost note, because it is easy to launch by accident: each d_halo value runs
+    `n_candidates x n_evolution_rounds x min(evolution_interval_iters,
+    iteration_budget)` inner iterations, and EVERY inner iteration is one
+    forward CFD plus one adjoint. With the defaults (6 halos x 5 candidates x
+    3 rounds x 10 iters) that is 900 solve-pairs. Size it deliberately.
+    """
+    _require_prerequisites(config)
+    validate_bindings(bindings)
+
+    failure_memory = FailureRegionMemory()
+
+    coarse = run_d_halo_sweep(
+        bindings, config, d_halo_values(W_mm, n_d_halo), W_mm, x_front_mm,
+        n_candidates=config.coarse_candidates_per_w,
+        out_dir=out_dir, gradient_weights=gradient_weights,
+        failure_memory=failure_memory, n_evolution_rounds=n_evolution_rounds,
+    )
+
+    scored = sorted(
+        (r.best.T_raw, r.best.d_halo_mm) for r in coarse
+        if r.best is not None and r.best.T_raw is not None
+    )
+    top_d = [d for _, d in scored[: config.top_w_count]]
+
+    refined: list[WResult] = []
+    if refine and top_d:
+        refined = run_d_halo_sweep(
+            bindings, config, refined_d_halo_values(top_d, W_mm), W_mm, x_front_mm,
+            n_candidates=config.refined_candidates_per_w,
+            out_dir=out_dir, gradient_weights=gradient_weights,
+            failure_memory=failure_memory, n_evolution_rounds=n_evolution_rounds,
+        )
+
+    pool: list[CandidateOutcome] = []
+    for r in coarse + refined:
+        pool.extend(o for o in r.all_outcomes if o.is_fully_valid)
+
+    ranked = final_ranking(pool)
+    build = select_build_candidate(pool)
+
+    reports: list[RobustnessReport] = []
+    if robustness_runner is not None:
+        for finalist in ranked[:n_finalists_for_robustness]:
+            reports.append(robustness_runner(finalist))
+
+    return SearchResult(
+        build_candidate=build,
+        backup_ranking=list(ranked[1:3]),
+        coarse_results=coarse,
+        refined_results=refined,
+        robustness_reports=reports,
+        failure_memory=failure_memory,
+    )
+
+
 def run_full_search(
     bindings: PipelineBindings,
     config: OptimizerConfig,
@@ -122,18 +218,7 @@ def run_full_search(
         PrerequisitesNotMet before touching any pipeline code if the two
         validation flags are not both True.
     """
-    if not config.rtc_validated_against_track_data:
-        raise PrerequisitesNotMet(
-            "Search Strategy step 1 unmet: RTC has not been validated "
-            "against real track data (config.rtc_validated_against_track_data "
-            "is False). Run the physical validation first."
-        )
-    if not config.cfd_pipeline_validated_on_known_geometry:
-        raise PrerequisitesNotMet(
-            "Search Strategy step 2 unmet: CFD pipeline has not been "
-            "validated on a known geometry "
-            "(config.cfd_pipeline_validated_on_known_geometry is False)."
-        )
+    _require_prerequisites(config)
     validate_bindings(bindings)
 
     failure_memory = FailureRegionMemory()

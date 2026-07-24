@@ -379,10 +379,86 @@ def real_bindings(
     return bindings
 
 
+# Triangle budget for the half-car STL handed to OpenFOAM.
+#
+# Measured on a real production-spacing build (2026-07-24): marching cubes emits
+# 1_057_912 triangles over 0.0467 m2 of half-car surface -- ~0.3 mm facets, a
+# 235 MB ASCII file. The CFD mesh it feeds is 1.21 mm at "medium" resolution,
+# i.e. ~32_000 surface cells. The STL was therefore ~16x FINER than any mesh
+# built from it, buying nothing and costing: 1.67 GB of Python heap in
+# _normalise_solid_name, 12.8 s to rewrite, 14.8 s to edge-manifold-check,
+# 4.3 s per re-parse (it is parsed 4+ times per solve), snappy's triSurface
+# search tree over a million facets, and surfaceFeatureExtract harvesting
+# "features" off every marching-cubes staircase step.
+#
+# 120k triangles is ~0.63 mm facets on this car -- still finer than the 0.606 mm
+# finest CFD cell at "medium" with underbody refinement, so nothing is lost.
+# Measured: 235 MB -> ~27 MB, volume preserved to 0.01%.
+#
+# Why not lower: quadric decimation of a marching-cubes half-car OPENS the
+# surface below ~120k faces (Euler number 2 -> 5 at 60k, i.e. holes), and Part 2
+# hard-rejects a non-edge-manifold STL. _decimate_for_cfd backs off until the
+# result is watertight rather than trusting this number blindly.
+# ponytail: the rule of thumb is facet size <= finest CFD cell size; revisit if
+# you move to "fine" resolution or raise underbody_refinement_level.
+STL_TRIANGLE_BUDGET = 120_000
+
+
+def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: int = 3):
+    """Reduce a marching-cubes surface to a CFD-appropriate triangle count.
+
+    Decimation is an optimisation, so it must never fail a candidate — but it
+    must also never SILENTLY do nothing, which is what the first version did:
+    it discarded any non-watertight result and returned the original, so a
+    1.06M-triangle STL sailed through unchanged with no signal. Back off toward
+    a coarser reduction instead, and say so if none of them hold.
+
+    Returns a watertight mesh, always: either a reduced one or the original.
+    """
+    import warnings
+
+    n = len(mesh.faces)
+    if n <= budget:
+        return mesh
+    target = budget
+    for _ in range(_max_backoffs):
+        if target >= n:
+            break
+        try:
+            reduced = mesh.simplify_quadric_decimation(face_count=target)
+        except Exception as exc:  # noqa: BLE001 -- optional, never fatal
+            warnings.warn(f"STL decimation unavailable ({exc}); using {n} faces.",
+                          RuntimeWarning, stacklevel=2)
+            return mesh
+        if reduced is not None and len(reduced.faces):
+            # Decimation can open the surface near the y=0 cap. Try to close it
+            # before giving up on this target.
+            if not reduced.is_watertight:
+                try:
+                    import trimesh
+                    trimesh.repair.fill_holes(reduced)
+                    reduced.remove_unreferenced_vertices()
+                except Exception:  # noqa: BLE001
+                    pass
+            if reduced.is_watertight:
+                return reduced
+        target *= 2  # too aggressive — keep more detail and retry
+    warnings.warn(
+        f"STL decimation could not keep the surface watertight at any target up "
+        f"to {target}; handing OpenFOAM the full {n}-triangle mesh. Expect slow "
+        f"snappyHexMesh and high memory in _normalise_solid_name.",
+        RuntimeWarning, stacklevel=2,
+    )
+    return mesh
+
+
 def unified_bindings(
     thrust_csv_path: str,
     fixed_hardware_kwargs: dict,
     out_dir: str,
+    cfd_kwargs: Optional[dict] = None,
+    adjoint_kwargs: Optional[dict] = None,
+    stl_triangle_budget: int = STL_TRIANGLE_BUDGET,
 ) -> PipelineBindings:
     """Bind Part 3 to the UNIFIED single-field geometry + the real objective.
 
@@ -399,8 +475,21 @@ def unified_bindings(
 
     The only thing still stubbed after this is the OpenFOAM binary: run_cfd /
     run_adjoint shell out to it exactly as in real_bindings.
+
+    cfd_kwargs / adjoint_kwargs are forwarded verbatim to Part 2's
+    run_half_car_cfd / run_half_car_adjoint. Before 2026-07-24 both were called
+    with ALL defaults, so `n_subdomains` was pinned to 1 (every solve
+    single-core, on a 360 GB box), `keep_run_dir` to False (logs deleted on the
+    failure path), and resolution/iteration caps were unreachable — which made
+    a cheap smoke run impossible to configure. Typical smoke values:
+        cfd_kwargs={"resolution": "coarse", "max_iterations": 300,
+                    "n_subdomains": 8, "keep_run_dir": True}
+        adjoint_kwargs={"resolution": "coarse", "primal_iters": 200,
+                        "adjoint_iters": 200, "keep_run_dir": True}
     """
     _add_sibling_packages_to_path()
+    cfd_kwargs = dict(cfd_kwargs or {})
+    adjoint_kwargs = dict(adjoint_kwargs or {})
 
     try:
         from unified_phi import (
@@ -468,7 +557,11 @@ def unified_bindings(
         stl_path = os.path.join(run_out_dir, f"{candidate_id}_full.stl")
         stl_half = os.path.join(run_out_dir, f"{candidate_id}_half.stl")
         mesh.export(stl_path, file_type="stl_ascii")
-        extract_half_surface(geom).export(stl_half, file_type="stl_ascii")
+        # Decimate ONLY the half-STL — it is the one that goes to OpenFOAM.
+        # The full STL is a deliverable/inspection artefact and keeps full
+        # marching-cubes fidelity.
+        half_mesh_cfd = _decimate_for_cfd(extract_half_surface(geom), stl_triangle_budget)
+        half_mesh_cfd.export(stl_half, file_type="stl_ascii")
         snap = geom.phi.save(candidate_id, run_out_dir)
         # The record contract wants the four component keys; the unified field
         # is one file, so all four point at it (single-field snapshot).
@@ -492,7 +585,7 @@ def unified_bindings(
         )
 
     def run_cfd(stl_half_path):
-        half, health = run_half_car_cfd(stl_half_path)
+        half, health = run_half_car_cfd(stl_half_path, **cfd_kwargs)
         full = half.to_full_car()
         return CFDOutcome(D20=full.D20, L=full.L, Cm=full.Cm, A=full.A,
                           converged=health.converged, residual_final=health.residual_final)
@@ -508,7 +601,7 @@ def unified_bindings(
 
     def run_adjoint(stl_half_path, objective_weight):
         import trimesh
-        sensitivity = run_half_car_adjoint(stl_half_path, objective_weight)
+        sensitivity = run_half_car_adjoint(stl_half_path, objective_weight, **adjoint_kwargs)
         half_mesh = trimesh.load(stl_half_path, process=False)
         if len(half_mesh.vertices) != len(sensitivity):
             raise ValueError(

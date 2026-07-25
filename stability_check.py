@@ -72,9 +72,15 @@ def check_stability(
 
     Args:
         total_mass_kg: full-car mass, kg.
-        x_com_m: COM fore-aft position measured from the FRONT AXLE, m
-            (this is the Part 2 mass_com_ingest convention; the caller owns
-            the origin, exactly as documented there).
+        x_com_m: COM fore-aft position measured FROM THE FRONT AXLE, m.
+
+            ⚠ This is NOT the mass_com_ingest convention, despite what this
+            docstring claimed until 2026-07-24. Part 2 reports com_x_m in CAR
+            coordinates with x=0 at the NOSE TIP
+            (physics_contract.MOMENT_REFERENCE_POINT_M). Callers must subtract
+            x_front: `x_com_m = mass_report.com_x_m - x_front_mm/1000`.
+            inner_loop was passing the nose-origin value unconverted, which
+            reported 13.5%/86.5% front/rear where the truth is 48.9%/51.1%.
         W_mm: wheelbase, mm.
         prerequisites_met: True only when all three Rolling Friction Policy
             prerequisites hold. Gate for Tier 2.

@@ -300,9 +300,25 @@ def _run_single_iteration(
     # gates; stability thresholds are a final-selection concern per spec's
     # robustness section). Import here to keep the module import-light.
     from stability_check import check_stability
+    # ORIGIN CONVERSION, do not remove. mass_report.com_x_m is in CAR
+    # coordinates (x=0 at the nose tip, physics_contract.MOMENT_REFERENCE_POINT_M);
+    # check_stability's wheel-load formula needs it measured FROM THE FRONT AXLE.
+    # Passing the nose-origin value straight through (what this did until
+    # 2026-07-24) reported 13.5%/86.5% front/rear at W=130/x_front=46 where the
+    # truth is 48.9%/51.1% -- a 35-point error, because a COM 112 mm behind the
+    # NOSE is only 66 mm behind the AXLE.
+    # LAUNCH condition, not finish-line condition. Static stability is about
+    # wheelie risk, which peaks at t=0 where thrust is highest -- and that is
+    # exactly when the ~7.9 g CO2 charge is still aboard, sitting well aft at
+    # the cartridge. It pulls com_x +13.5 mm rearward at W=130/x_front=46,
+    # unloading the front axle by ~10 percentage points. Evaluating stability
+    # on the dry (finish-line) COM flatters the car at the one instant it
+    # matters. Worth <=0.11 ms of race time, which is why the OBJECTIVE keeps
+    # using the dry COM; worth 10 points of front-axle load here.
+    _launch_mass, _launch_com_x, _, _ = mass_report.launch_com()
     stability = check_stability(
-        total_mass_kg=mass_report.total_mass_kg,
-        x_com_m=mass_report.com_x_m,
+        total_mass_kg=_launch_mass,
+        x_com_m=_launch_com_x - (x_front_mm / 1000.0),
         W_mm=W_mm,
     )
 

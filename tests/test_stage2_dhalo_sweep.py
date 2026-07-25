@@ -294,6 +294,54 @@ def test_stage1_cargo_placement_reaches_the_built_geometry():
                               cargo_placement=placement)
 
 
+def test_launch_com_blends_the_propellant_and_excludes_it_from_totals():
+    """The CO2 charge moves the COM while it is aboard, but is not in the dry
+    totals -- that separation is what stops the mass double-count returning."""
+    from pipeline_interface import MassReport
+
+    dry = MassReport(total_mass_kg=0.048, com_x_m=0.1124, com_y_m=0.0,
+                     com_z_m=0.0297, propellant_mass_kg=0.00787,
+                     propellant_com=(0.2082, 0.0, 0.035))
+    m, cx, _cy, cz = dry.launch_com()
+
+    # Totals stay dry; only launch_com() sees the charge.
+    assert dry.total_mass_kg == 0.048
+    assert abs(m - (0.048 + 0.00787)) < 1e-12
+    # Propellant sits aft and high, so it pulls the COM back and up.
+    assert cx > dry.com_x_m and cz > dry.com_z_m
+    assert 0.012 < cx - dry.com_x_m < 0.015, f"com_x shift {cx - dry.com_x_m}"
+    # Exact mass-weighted blend.
+    expect = (0.048 * 0.1124 + 0.00787 * 0.2082) / (0.048 + 0.00787)
+    assert abs(cx - expect) < 1e-12
+    # No charge -> launch_com is the dry COM exactly.
+    empty = MassReport(total_mass_kg=0.048, com_x_m=0.1124, com_y_m=0.0, com_z_m=0.0297)
+    assert empty.launch_com()[1] == 0.1124
+
+
+def test_stability_gets_front_axle_origin_not_nose_origin():
+    """check_stability's wheel-load formula needs COM measured from the front
+    axle; mass_com_ingest reports it from the NOSE. Passing it unconverted
+    reported 13.5%/86.5% front/rear where the truth is 48.9%/51.1%."""
+    from stability_check import check_stability
+
+    W_mm, x_front_mm, com_nose_m = 130.0, 46.0, 0.1124
+    wrong = check_stability(total_mass_kg=0.048, x_com_m=com_nose_m, W_mm=W_mm)
+    right = check_stability(total_mass_kg=0.048,
+                            x_com_m=com_nose_m - x_front_mm / 1000.0, W_mm=W_mm)
+
+    def front_frac(r):
+        return r.static_W_front_N / (r.static_W_front_N + r.static_W_rear_N)
+
+    assert front_frac(wrong) < 0.2, "sanity: the unconverted value is badly rear-biased"
+    assert 0.45 < front_frac(right) < 0.55, (
+        f"front-axle-origin COM should be near-balanced, got {front_frac(right):.3f}"
+    )
+    assert abs(front_frac(right) - front_frac(wrong)) > 0.3, (
+        "the origin conversion must materially change the answer, or the test "
+        "is not exercising it"
+    )
+
+
 def _write_tetra(path: Path) -> None:
     v = [(0, 0, 0.002), (0.01, 0, 0.002), (0, 0.01, 0.002), (0, 0, 0.012)]
     tris = [(0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)]
@@ -317,6 +365,8 @@ if __name__ == "__main__":
         test_ground_plane_sits_on_the_track_with_a_rolling_road,
         test_cfd_stl_is_under_budget_and_still_meets_part2_contract,
         test_stage1_cargo_placement_reaches_the_built_geometry,
+        test_launch_com_blends_the_propellant_and_excludes_it_from_totals,
+        test_stability_gets_front_axle_origin_not_nose_origin,
     ):
         _run(t)
     print(f"\n{_passed} passed, {_failed} failed")

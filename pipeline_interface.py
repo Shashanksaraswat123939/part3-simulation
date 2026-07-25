@@ -72,12 +72,32 @@ class ObjectiveOutcome:
 
 @dataclass(frozen=True)
 class MassReport:
-    """Part 3's view of Part 2's FullCarMassCOM."""
+    """Part 3's view of Part 2's FullCarMassCOM.
+
+    total_mass_kg / com_*_m describe the car as it CROSSES THE LINE -- dry, all
+    propellant spent. The CO2 charge is reported separately because it is only
+    aboard at the start; race_objective owns its mass over time. Use
+    `launch_com()` for anything evaluated at t=0.
+    """
 
     total_mass_kg: float
     com_x_m: float
     com_y_m: float
     com_z_m: float
+    propellant_mass_kg: float = 0.0
+    propellant_com: tuple = (0.0, 0.0, 0.0)
+
+    def launch_com(self) -> tuple:
+        """(mass, com_x, com_y, com_z) with a full propellant charge aboard."""
+        m = self.total_mass_kg + self.propellant_mass_kg
+        if m <= 0:
+            return (0.0, self.com_x_m, self.com_y_m, self.com_z_m)
+        px, py, pz = self.propellant_com
+        w, p = self.total_mass_kg, self.propellant_mass_kg
+        return (m,
+                (w * self.com_x_m + p * px) / m,
+                (w * self.com_y_m + p * py) / m,
+                (w * self.com_z_m + p * pz) / m)
 
 
 @dataclass(frozen=True)
@@ -282,6 +302,8 @@ def real_bindings(
             com_x_m=full.com_x_m,
             com_y_m=full.com_y_m,
             com_z_m=full.com_z_m,
+            propellant_mass_kg=full.propellant_mass_kg,
+            propellant_com=tuple(full.propellant_com),
         )
 
     def run_cfd(stl_half_path):
@@ -593,6 +615,8 @@ def unified_bindings(
         return MassReport(
             total_mass_kg=full.total_mass_kg, com_x_m=full.com_x_m,
             com_y_m=full.com_y_m, com_z_m=full.com_z_m,
+            propellant_mass_kg=full.propellant_mass_kg,
+            propellant_com=tuple(full.propellant_com),
         )
 
     def run_cfd(stl_half_path):

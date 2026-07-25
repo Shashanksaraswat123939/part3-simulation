@@ -39,18 +39,31 @@ def _run(fn):
         _failed += 1
 
 
-def test_d_halo_values_respect_the_strict_upper_bound():
-    from optimizer_contract import validate_d_halo
+def test_d_halo_values_respect_both_physical_bounds():
+    from optimizer_contract import D_HALO_MIN_MM, validate_d_halo
     from wheelbase_sweep import d_halo_values
     for W in (120.0, 130.0, 140.0):
         vals = d_halo_values(W, n=6)
         assert len(vals) == 6, vals
         assert vals == sorted(vals)
-        assert vals[0] == 0.0
+        # Starts at the forward-most physical position (pocket front on the
+        # front axle line), NOT 0 -- 0 would put the halo ahead of the axle.
+        assert vals[0] == D_HALO_MIN_MM, f"{vals[0]} != {D_HALO_MIN_MM}"
         for d in vals:
-            # Must not raise — this is Part 1's own gate.
-            validate_d_halo(d, W)
+            validate_d_halo(d, W)   # Part 1's gate, mirrored
         assert vals[-1] < W - 34.0, f"top sample {vals[-1]} not below {W - 34.0}"
+
+
+def test_part1_and_part3_agree_on_the_d_halo_floor():
+    """The two D_HALO_MIN_MM constants are duplicated by design; pin them."""
+    import optimizer_contract as p3
+    try:
+        import geometry_contract as p1
+    except ImportError:
+        return  # Part 1 not importable here; the Part 1 suite covers its side
+    assert p3.D_HALO_MIN_MM == p1.D_HALO_MIN_MM, (
+        f"Part 3 says {p3.D_HALO_MIN_MM}, Part 1 says {p1.D_HALO_MIN_MM}"
+    )
 
 
 def test_refined_d_halo_values_stay_legal():
@@ -295,7 +308,8 @@ def _write_tetra(path: Path) -> None:
 
 if __name__ == "__main__":
     for t in (
-        test_d_halo_values_respect_the_strict_upper_bound,
+        test_d_halo_values_respect_both_physical_bounds,
+        test_part1_and_part3_agree_on_the_d_halo_floor,
         test_refined_d_halo_values_stay_legal,
         test_d_halo_values_rejects_a_degenerate_range,
         test_sweep_varies_d_halo_and_holds_W_and_x_front_fixed,

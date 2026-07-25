@@ -24,12 +24,18 @@ def test_wheelbase_and_halo_validation():
     expect_raises(ValueError, validate_W, 119.999)
     expect_raises(ValueError, validate_W, 140.001)
 
-    # Upper bound is W-34 mm, strict/exclusive (K-5, placement-derived — was
-    # W+16, which allowed candidates Part 1's hardware placement rejects).
-    # At W=120: bound is 86.0 mm.
-    validate_d_halo(0.0, 120.0)
+    # Range is [16, W-34), both bounds physical:
+    #   16   = halo pocket FRONT edge on the front axle line (forward-most
+    #          travel). Ref Plane A is 16 mm ahead of the axle and d_halo is
+    #          measured from it, so this is exact and W-independent. Was 0,
+    #          which let the halo sit up to 16 mm AHEAD of the front axle.
+    #   W-34 = pocket REAR edge must not reach the rear axle, strict/exclusive.
+    # At W=120: [16.0, 86.0).
+    validate_d_halo(16.0, 120.0)
     validate_d_halo(85.99, 120.0)
     expect_raises(ValueError, validate_d_halo, -0.01, 120.0)
+    expect_raises(ValueError, validate_d_halo, 0.0, 120.0)     # below forward-most
+    expect_raises(ValueError, validate_d_halo, 15.99, 120.0)
     expect_raises(ValueError, validate_d_halo, 86.0, 120.0)
     expect_raises(ValueError, validate_d_halo, 136.0, 120.0)
 

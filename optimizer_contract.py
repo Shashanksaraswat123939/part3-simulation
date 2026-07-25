@@ -68,7 +68,13 @@ def calibrate_x_front_bounds(W_mm: float) -> tuple[float, float]:
     return x_min, x_max
 
 
-D_HALO_MIN_MM: float = 0.0
+# Forward-most halo travel: pocket FRONT edge on the front axle line. Ref Plane
+# A sits 16 mm ahead of the axle and d_halo is measured from it, so this is
+# exactly 16 mm and is independent of W. Was 0.0, which allowed the halo up to
+# 16 mm AHEAD of the front axle. MUST mirror
+# geometry_contract.D_HALO_MIN_MM (Part 1) -- test_optimizer_contract
+# cross-checks when Part 1 is importable.
+D_HALO_MIN_MM: float = 16.0
 # d_halo upper bound is STRICTLY less than W - 34 mm, derived from the halo
 # pocket placement constraint in Part 1 (halo pocket length 50mm, Ref Plane A
 # offset 16mm → pocket rear = ref_A + d_halo + 50mm must stay before rear axle).

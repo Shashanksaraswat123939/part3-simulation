@@ -119,6 +119,7 @@ def run_stage2_dhalo_search(
     n_evolution_rounds: int = 3,
     n_finalists_for_robustness: int = 3,
     refine: bool = True,
+    d_halo_list: Optional[list] = None,
 ) -> SearchResult:
     """Stage 2 of the two-stage architecture: sweep d_halo at FIXED W/x_front.
 
@@ -127,6 +128,18 @@ def run_stage2_dhalo_search(
     the two-stage split, and re-decides with expensive CFD a scalar Stage 1
     already chose cheaply from mass/COM. Use this for the two-stage flow; W and
     x_front arrive frozen from `part1-simulation/stage1_search.py`.
+
+    d_halo_list overrides the evenly-spaced `d_halo_values(W_mm, n_d_halo)`
+    sampling. Pass one when the caller knows which values are actually
+    BUILDABLE: `d_halo_values` only respects the `< W-34` placement bound, but a
+    value can be inside that bound and still produce no geometry, because the
+    50 mm halo pocket can land mid-corridor and split the cargo corridor into
+    two segments, neither long enough for the 60 mm T4.2 cargo. Measured at
+    W=130/x_front=46: d_halo 36..75 mm is legal-but-unbuildable, 42% of the
+    range, and the default 6-point sampling puts 2 of its 6 values (33% of the
+    budget) straight into it. Part 3 cannot check this itself -- it never
+    imports Part 1 -- so the entry point does it and passes the list in; see
+    run_two_stage.py.
 
     Cost note, because it is easy to launch by accident: each d_halo value runs
     `n_candidates x n_evolution_rounds x min(evolution_interval_iters,
@@ -138,9 +151,10 @@ def run_stage2_dhalo_search(
     validate_bindings(bindings)
 
     failure_memory = FailureRegionMemory()
+    values = d_halo_list if d_halo_list else d_halo_values(W_mm, n_d_halo)
 
     coarse = run_d_halo_sweep(
-        bindings, config, d_halo_values(W_mm, n_d_halo), W_mm, x_front_mm,
+        bindings, config, values, W_mm, x_front_mm,
         n_candidates=config.coarse_candidates_per_w,
         out_dir=out_dir, gradient_weights=gradient_weights,
         failure_memory=failure_memory, n_evolution_rounds=n_evolution_rounds,

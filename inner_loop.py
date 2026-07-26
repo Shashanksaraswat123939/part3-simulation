@@ -279,13 +279,27 @@ def _run_single_iteration(
             snaps,
         )
 
+    # COM is taken with the CO2 charge FULLY ABOARD, every iteration, and is
+    # not migrated as the propellant empties (project owner, 2026-07-24).
+    # Justification measured before adopting it: the true COM travels 13.5 mm
+    # forward in com_x and 0.75 mm down in com_z over the first ~0.2 s of a
+    # ~1.23 s run, and ignoring that migration entirely costs <= 0.11 ms of race
+    # time -- an upper bound, holding the launch COM for the whole run, which is
+    # exactly what this does. That is far below every other modelling error in
+    # the stack, and it buys a single unambiguous COM per candidate.
+    #
+    # Note the deliberate asymmetry: m_total stays DRY because the objective
+    # adds the propellant mass itself over time (car_mass_from_time). Mass is
+    # modelled as time-varying; COM is not.
+    _, _launch_com_x, _, _launch_com_z = mass_report.launch_com()
+
     # Step 8: race objective.
     try:
         objective = bindings.evaluate_objective(
             D20=cfd.D20, L=cfd.L,
             m_total=mass_report.total_mass_kg,
-            h_com=mass_report.com_z_m,
-            x_com=mass_report.com_x_m,
+            h_com=_launch_com_z,
+            x_com=_launch_com_x,
             mu=config.mu, wheel_moi=config.wheel_moi_kg_m2,
         )
     except Exception as exc:  # noqa: BLE001
@@ -327,11 +341,14 @@ def _run_single_iteration(
     # signature: update_phi(phi_grids, right_half_sensitivity,
     # right_half_mesh, dt, gradient_weights)).
     try:
+        # Same COM convention as the objective above -- these two MUST agree,
+        # or the adjoint weight w_D20 = dT/dD20 is differentiating a different
+        # operating point than the one the objective value came from.
         w_D20 = bindings.compute_adjoint_weight(
             D20=cfd.D20, L=cfd.L,
             m_total=mass_report.total_mass_kg,
-            h_com=mass_report.com_z_m,
-            x_com=mass_report.com_x_m,
+            h_com=_launch_com_z,
+            x_com=_launch_com_x,
             mu=config.mu, wheel_moi=config.wheel_moi_kg_m2,
         )
         # run_adjoint returns the sensitivity together with the half-car mesh

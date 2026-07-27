@@ -426,6 +426,43 @@ def real_bindings(
 STL_TRIANGLE_BUDGET = 120_000
 
 
+# How far below the symmetry plane a vertex may drift and still be treated as
+# rounding rather than a broken half. Quadric decimation moves vertices to
+# error-minimising positions, so a y=0 cap vertex lands microns either side; a
+# millimetre-scale excursion would mean the half itself is wrong and must still
+# fail loudly rather than be snapped into looking correct.
+_SYMMETRY_SNAP_TOL_M = 1.0e-4
+
+
+def _snap_symmetry_plane(mesh):
+    """Re-impose y >= 0 after any operation that moves vertices.
+
+    extract_half_surface already flattens sub-cell overshoot onto y=0, but
+    DECIMATION RUNS AFTER IT and repositions vertices, which puts them back
+    below the plane. Measured 2026-07-27: an aero-only iteration produced a
+    vertex at y = -1.000000e-6 against Part 2's y >= -1e-6 contract, exactly on
+    the tolerance edge, and the candidate died at the CFD gate with
+    "Expected right-half only".
+
+    This is the shared exit every CFD half-STL passes through, so the invariant
+    is restored once here rather than at each caller.
+    """
+    import numpy as _np
+    y = mesh.vertices[:, 1]
+    below = y < 0.0
+    if not below.any():
+        return mesh
+    worst = float(-y[below].min())          # largest excursion below the plane
+    if worst > _SYMMETRY_SNAP_TOL_M:
+        raise ValueError(
+            f"half-car mesh has a vertex {worst * 1e3:.4f} mm below the y=0 "
+            f"symmetry plane, far past the {_SYMMETRY_SNAP_TOL_M * 1e3:.4f} mm "
+            f"rounding tolerance. This is a broken half, not decimation noise."
+        )
+    mesh.vertices[below, 1] = 0.0
+    return mesh
+
+
 def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: int = 3):
     """Reduce a marching-cubes surface to a CFD-appropriate triangle count.
 
@@ -441,7 +478,7 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
 
     n = len(mesh.faces)
     if n <= budget:
-        return mesh
+        return _snap_symmetry_plane(mesh)
     target = budget
     for _ in range(_max_backoffs):
         if target >= n:
@@ -451,7 +488,7 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
         except Exception as exc:  # noqa: BLE001 -- optional, never fatal
             warnings.warn(f"STL decimation unavailable ({exc}); using {n} faces.",
                           RuntimeWarning, stacklevel=2)
-            return mesh
+            return _snap_symmetry_plane(mesh)
         if reduced is not None and len(reduced.faces):
             # Decimation can open the surface near the y=0 cap. Try to close it
             # before giving up on this target.
@@ -463,7 +500,7 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
                 except Exception:  # noqa: BLE001
                     pass
             if reduced.is_watertight:
-                return reduced
+                return _snap_symmetry_plane(reduced)
         target *= 2  # too aggressive — keep more detail and retry
     warnings.warn(
         f"STL decimation could not keep the surface watertight at any target up "
@@ -471,7 +508,7 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
         f"snappyHexMesh and high memory in _normalise_solid_name.",
         RuntimeWarning, stacklevel=2,
     )
-    return mesh
+    return _snap_symmetry_plane(mesh)
 
 
 def unified_bindings(

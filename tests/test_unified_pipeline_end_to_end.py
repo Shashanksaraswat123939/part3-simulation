@@ -127,6 +127,44 @@ def test_update_phi_evolves_the_unified_field():
     _pass("test_update_phi_evolves_the_unified_field")
 
 
+def test_decimation_restores_the_symmetry_plane():
+    """Decimation runs AFTER extract_half_surface's clamp and moves vertices.
+
+    Measured 2026-07-27: an aero-only iteration handed OpenFOAM a half-STL with
+    a vertex at y = -1.000000e-6, exactly on Part 2's y >= -1e-6 tolerance edge,
+    and the candidate died at the CFD gate. The clamp existed; it just ran
+    before the operation that broke it.
+    """
+    import numpy as np
+    import trimesh
+    from pipeline_interface import _snap_symmetry_plane
+
+    m = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    m.vertices[:, 1] += 0.5             # sit the box on y=0, like a real half
+    m.vertices[0, 1] = -1.0e-6          # decimation-scale overshoot
+    m.vertices[1, 1] = -3.0e-7
+    out = _snap_symmetry_plane(m)
+    assert (out.vertices[:, 1] >= 0.0).all(), "symmetry plane not restored"
+    print("PASS test_decimation_restores_the_symmetry_plane")
+
+
+def test_symmetry_snap_refuses_a_genuinely_broken_half():
+    """Snapping must not paper over a half that is actually wrong."""
+    import trimesh
+    from pipeline_interface import _snap_symmetry_plane
+
+    m = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    m.vertices[:, 1] += 0.5
+    m.vertices[0, 1] = -5.0e-3          # 5 mm: not rounding
+    try:
+        _snap_symmetry_plane(m)
+    except ValueError as exc:
+        assert "below the y=0 symmetry plane" in str(exc)
+        print("PASS test_symmetry_snap_refuses_a_genuinely_broken_half")
+        return
+    raise AssertionError("a 5 mm excursion was silently snapped")
+
+
 if __name__ == "__main__":
     fns = [f for f in dir(sys.modules[__name__]) if f.startswith("test_")]
     passed = failed = 0

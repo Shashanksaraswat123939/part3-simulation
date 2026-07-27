@@ -60,6 +60,14 @@ class IterationLog:
     gradient_norm: Optional[float]
     failure_reason: Optional[str]
     record_path: Optional[str]
+    # Drag and mass are carried separately because T_raw alone cannot validate
+    # the adjoint. T_raw moves with BOTH the drag the adjoint minimises and the
+    # mass the scalar gradient removes, so a rise or fall in it is unattributable.
+    # A 2026-07-27 smoke run read a T_raw rise as an inverted adjoint sign; the
+    # aero term was inert and the mass term was doing all of it. To test the
+    # adjoint you need D20 at w_mass=0, which means D20 has to be in the log.
+    D20: Optional[float] = None
+    total_mass_kg: Optional[float] = None
 
 
 @dataclass
@@ -395,6 +403,7 @@ def _run_single_iteration(
         iteration=iteration, lifecycle_state=gate.lifecycle_state,
         T_raw=objective.T_raw, T_penalized=T_penalized,
         gradient_norm=grad_norm, failure_reason=None, record_path=record_path,
+        D20=cfd.D20, total_mass_kg=mass_report.total_mass_kg,
     )
     return outcome, log, snaps
 

@@ -392,10 +392,22 @@ def _run_single_iteration(
         T_raw=objective.T_raw, T_penalized=T_penalized,
         failure_reason=None, phi_snapshot_paths=snaps,
     )
+    # Carry the CFD and mass results into the record. Without them a ranked
+    # table shows race time and nothing else -- merge_results printed empty D20
+    # and mass columns on the first real record, and those are exactly the two
+    # numbers you want beside T_raw when deciding whether a ranking is credible
+    # (a car that is faster because it is lighter is a different story from one
+    # that is faster because it is slipperier). Both are in scope here; the
+    # record just never asked for them.
     record_path = _try_write_record(
         bindings, outcome,
         extra={"stability_notes": stability.notes,
-               "statically_stable": stability.statically_stable},
+               "statically_stable": stability.statically_stable,
+               # The objects, not dicts: the serialiser reads attributes.
+               "cfd_force_report": cfd,
+               "mass_report": mass_report,
+               "com_report": mass_report,
+               "gradients": objective.gradients},
     )
     outcome = CandidateOutcome(
         candidate_id=outcome.candidate_id, W_mm=outcome.W_mm,

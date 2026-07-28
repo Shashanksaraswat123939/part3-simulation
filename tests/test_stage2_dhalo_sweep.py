@@ -221,6 +221,43 @@ def test_ground_plane_sits_on_the_track_with_a_rolling_road():
         assert "searchableBox" in snappy
 
 
+def test_prerequisite_gate_blocks_an_unvalidated_sweep():
+    """The gate exists to stop a multi-day sweep whose numbers cannot mean
+    anything, and had no test at all.
+
+    It was previously dead: run_optimization.py hardcoded both flags True with
+    the comment "set here so the wiring can be exercised", so nothing could
+    ever trip it. They are CLI flags now, defaulting False. --smoke bypasses
+    the orchestrator entirely (deliberately — it is a wiring check), so this is
+    the only place the gate gets exercised.
+    """
+    from orchestrator import run_stage2_dhalo_search, PrerequisitesNotMet
+    from optimizer_contract import OptimizerConfig
+
+    for rtc, cfd, expect in ((False, False, True), (True, False, True),
+                             (False, True, True)):
+        cfg = OptimizerConfig(
+            rtc_validated_against_track_data=rtc,
+            cfd_pipeline_validated_on_known_geometry=cfd,
+            mu=0.01, wheel_moi_kg_m2=1e-7,
+        )
+        try:
+            # bindings=None / weights=None are fine: the gate must fire BEFORE
+            # anything is used. If it does not, the TypeError from touching them
+            # is itself the failure signal.
+            run_stage2_dhalo_search(None, cfg, 130.0, 46.0,
+                                    tempfile.gettempdir(), None)
+        except PrerequisitesNotMet:
+            assert expect, f"gate fired unexpectedly for rtc={rtc} cfd={cfd}"
+            continue
+        except Exception as exc:  # noqa: BLE001
+            raise AssertionError(
+                f"expected PrerequisitesNotMet for rtc={rtc} cfd={cfd}, "
+                f"got {type(exc).__name__}: {exc}") from exc
+        raise AssertionError(
+            f"no gate for rtc={rtc} cfd={cfd} — an unvalidated sweep would run")
+
+
 def test_stage1_cargo_placement_reaches_the_built_geometry():
     """Stage 1's scored cargo choice must survive into every Stage-2 car.
 
@@ -364,6 +401,7 @@ if __name__ == "__main__":
         test_iteration_budget_is_not_silently_discarded,
         test_ground_plane_sits_on_the_track_with_a_rolling_road,
         test_cfd_stl_is_under_budget_and_still_meets_part2_contract,
+        test_prerequisite_gate_blocks_an_unvalidated_sweep,
         test_stage1_cargo_placement_reaches_the_built_geometry,
         test_launch_com_blends_the_propellant_and_excludes_it_from_totals,
         test_stability_gets_front_axle_origin_not_nose_origin,

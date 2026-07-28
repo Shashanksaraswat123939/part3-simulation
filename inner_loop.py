@@ -33,6 +33,11 @@ from __future__ import annotations
 
 import math
 import traceback
+import warnings
+
+# Distinct record-write failure causes already warned about, so a broken record
+# layer says so once rather than once per iteration.
+_RECORD_WRITE_WARNED: set = set()
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -427,5 +432,22 @@ def _try_write_record(bindings: PipelineBindings, outcome: CandidateOutcome,
         payload.update(extra)
     try:
         return bindings.write_candidate_record(payload)
-    except Exception:  # noqa: BLE001 — deliberate: persistence failure != physics failure
+    except Exception as exc:  # noqa: BLE001 — persistence failure != physics failure
+        # Still non-fatal, but no longer SILENT. This swallow hid a record layer
+        # that never worked at all: the payload carried x_front_mm, which
+        # CandidateRecord did not accept, so every write raised TypeError and
+        # every record_path came back None. Candidate records ARE the output --
+        # ranking across d_halo values and merging shards both read them -- so a
+        # sweep could have run for days and produced nothing, reporting success
+        # throughout. Warn once per distinct cause.
+        global _RECORD_WRITE_WARNED
+        key = f"{type(exc).__name__}: {exc}"[:200]
+        if key not in _RECORD_WRITE_WARNED:
+            _RECORD_WRITE_WARNED.add(key)
+            warnings.warn(
+                f"candidate record write FAILED and was skipped: {key}. "
+                f"The optimiser will keep running, but it is producing no "
+                f"records -- nothing downstream can rank or merge these results.",
+                RuntimeWarning, stacklevel=2,
+            )
         return None

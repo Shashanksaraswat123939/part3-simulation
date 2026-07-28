@@ -692,7 +692,30 @@ def unified_bindings(
         )
 
     def write_record(outcome: dict) -> str:
-        return write_candidate_record(CandidateRecord(**outcome), out_dir)
+        # Drop keys CandidateRecord does not declare rather than raising.
+        #
+        # `CandidateRecord(**outcome)` meant any new key in the inner loop's
+        # payload broke persistence entirely, and inner_loop swallowed the
+        # TypeError -- so the record layer was dead and silent. It failed first
+        # on x_front_mm, then on stability_notes; both are now real fields, but
+        # the pattern would repeat on the next addition.
+        #
+        # Unknown keys are reported once, because silently dropping data is the
+        # failure mode this whole area already had.
+        import dataclasses as _dc
+        known = {f.name for f in _dc.fields(CandidateRecord)}
+        extra_keys = set(outcome) - known
+        if extra_keys:
+            import warnings
+            warnings.warn(
+                f"candidate record: dropping unrecognised field(s) "
+                f"{sorted(extra_keys)}. Add them to CandidateRecord if they "
+                f"are worth persisting.", RuntimeWarning, stacklevel=2,
+            )
+        return write_candidate_record(
+            CandidateRecord(**{k: v for k, v in outcome.items() if k in known}),
+            out_dir,
+        )
 
     bindings = PipelineBindings(
         initialize_phi_fields=initialize_phi_fields,

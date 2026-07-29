@@ -52,6 +52,19 @@ class CFDOutcome:
     A: float
     converged: bool
     residual_final: float
+    # Peak-to-peak swing of streamwise force over the averaged window, as a
+    # fraction of its mean. None when not measured.
+    #
+    # Part 2 measures this and its comment states the contract: "The signal is
+    # reported instead, and warned about. Whether an unsteady force is fatal is
+    # a policy decision for the caller." The caller handed that decision never
+    # received the number -- CFDOutcome had no field for it, so it died at the
+    # Part 2 -> Part 3 boundary and survived only as a warning in a worker
+    # thread. It is the reproducibility marker for D20 (measured 18-29% against
+    # a 5% limit), so without it a candidate record cannot say how much to trust
+    # its own race time, and merge_results ranks on a number whose error bar was
+    # deliberately computed and then dropped.
+    force_oscillation: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +326,7 @@ def real_bindings(
             D20=full.D20, L=full.L, Cm=full.Cm, A=full.A,
             converged=health.converged,
             residual_final=health.residual_final,
+            force_oscillation=health.force_oscillation,
         )
 
     def evaluate_objective(D20, L, m_total, h_com, x_com, mu, wheel_moi):
@@ -513,7 +527,7 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
 
 def unified_bindings(
     thrust_csv_path: str,
-    fixed_hardware_kwargs: dict,
+    fixed_hardware_kwargs,          # dict, or callable(W_mm) -> dict
     out_dir: str,
     cfd_kwargs: Optional[dict] = None,
     adjoint_kwargs: Optional[dict] = None,
@@ -575,8 +589,38 @@ def unified_bindings(
             f"unified_bindings requires part2_simulation/ on the path. Cause: {exc}"
         ) from exc
 
-    fixed_hardware = FixedHardwareSpec(**fixed_hardware_kwargs)
+    # Geometry-dependent, and BOTH sweep axes move it. The rear axle sits at
+    # x_front + W, so the rear wheel/axle COM follows W; the canister COM and
+    # rear-wing COM come off bounding volumes that depend on d_halo. Building
+    # one spec here froze the whole fixed-hardware layout at whatever (W,
+    # d_halo) the caller happened to pass -- run_optimization pinned W=130 while
+    # sweeping W, run_two_stage pinned d_halo=20.0 while sweeping d_halo. So
+    # accept a callable with default_fixed_hardware_kwargs' own signature and
+    # re-derive per geometry.
+    if callable(fixed_hardware_kwargs):
+        _build_fh = fixed_hardware_kwargs
+    else:
+        _build_fh = lambda *_a: fixed_hardware_kwargs  # noqa: E731
+    _fh_cache: dict = {}
+
+    def fixed_hardware_for(geom):
+        # One spec per distinct (W, x_front, d_halo); a sweep visits a handful.
+        key = (round(float(geom.W_mm), 6), round(float(geom.x_front_mm), 6),
+               round(float(geom.d_halo_mm), 6))
+        if key not in _fh_cache:
+            _fh_cache[key] = FixedHardwareSpec(**_build_fh(*key))
+        return _fh_cache[key]
+
     model = build_smooth_sheet_model(thrust_csv_path)
+    # The propellant charge from THIS csv, not mass_com_ingest's nominal 8.00 g.
+    # The two disagreed by 0.13 g: the mass rollup carried 8.00 g at the canister
+    # COM while race_objective burned the csv's own 7.87 g sheet, so the launch
+    # mass the objective saw and the launch mass the record reported were
+    # different numbers. Small (~2 ms of race time) but free to get right.
+    import jax.numpy as _jnp
+    from race_objective import sheet_mass as _sheet_mass
+    _propellant_kg = float(_sheet_mass(_jnp.float64(0.0), model)
+                           - model.mass_sheet_final)
     _COMPONENT_KEYS = ("nose", "sidepod", "rearpod", "main_body")
 
     def _params(D20, L, m_total, h_com, x_com, mu, wheel_moi):
@@ -648,7 +692,8 @@ def unified_bindings(
 
     def compute_mass_report(geom):
         machined = compute_mass_com(geom)
-        full = ingest_mass_com(machined, fixed_hardware)
+        full = ingest_mass_com(machined, fixed_hardware_for(geom),
+                               propellant_mass_kg=_propellant_kg)
         return MassReport(
             total_mass_kg=full.total_mass_kg, com_x_m=full.com_x_m,
             com_y_m=full.com_y_m, com_z_m=full.com_z_m,
@@ -660,7 +705,9 @@ def unified_bindings(
         half, health = run_half_car_cfd(stl_half_path, **cfd_kwargs)
         full = half.to_full_car()
         return CFDOutcome(D20=full.D20, L=full.L, Cm=full.Cm, A=full.A,
-                          converged=health.converged, residual_final=health.residual_final)
+                          converged=health.converged,
+                          residual_final=health.residual_final,
+                          force_oscillation=health.force_oscillation)
 
     def evaluate_objective(D20, L, m_total, h_com, x_com, mu, wheel_moi):
         p = _params(D20, L, m_total, h_com, x_com, mu, wheel_moi)

@@ -86,7 +86,35 @@ D_HALO_PLACEMENT_MARGIN_MM: float = 34.0   # 50mm pocket - 16mm Ref_A offset
 # Inner-loop convergence (spec: "Convergence Criteria")
 # ---------------------------------------------------------------------------
 
-INNER_CONVERGENCE_DELTA_T_S: float = 1e-3       # |ΔT_penalized| < 1 ms
+# |ΔT_penalized| below this, for INNER_CONVERGENCE_CONSECUTIVE iterations in a
+# row, means the inner loop has stopped making measurable progress.
+#
+# SET FROM THE MEASUREMENT NOISE, which is the only scale that makes the test
+# meaningful. Drag on this pipeline is reproducible to about ±15 ms of race
+# time, so a step smaller than that cannot be distinguished from noise.
+#
+# Both previous values were wrong in opposite directions, and the second was my
+# own over-correction:
+#   1 ms, single sample  -> P(fire | pure noise) = 0.08 per step. A real run
+#                           stopped after ONE update on ΔT = 0.372 ms and
+#                           reported converged=True: convergence declared on
+#                           noise.
+#   1 ms, 3 consecutive  -> P(3 in a row) = 5.1e-4, so ~0.4% chance of ever
+#                           firing within a 10-iteration budget. The criterion
+#                           became unreachable, and since the gradient-norm stop
+#                           is also dead, `converged` could never be written at
+#                           all -- only budget and gate-failure stops remained,
+#                           and both set converged=False.
+#   15 ms, 3 consecutive -> P(3 in a row | pure noise) ≈ 0.66, while a run
+#                           genuinely improving by more than 15 ms per step
+#                           keeps going.
+#
+# ⚠ WHAT THIS MEANS WHEN IT FIRES: "no further improvement is MEASURABLE", not
+# "the optimum has been reached". Those coincide only when the measurement is
+# good enough; here it is the measurement that binds. Tighten this the moment
+# the force oscillation is fixed -- it should track the noise, not sit at a
+# round number.
+INNER_CONVERGENCE_DELTA_T_S: float = 15e-3
 # ...and it must hold for this many CONSECUTIVE iterations before the inner loop
 # calls itself converged.
 #

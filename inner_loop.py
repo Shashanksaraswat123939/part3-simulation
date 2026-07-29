@@ -423,6 +423,10 @@ def _run_single_iteration(
         extra={"stability_notes": stability.notes,
                "statically_stable": stability.statically_stable,
                # The objects, not dicts: the serialiser reads attributes.
+               # The winning car's geometry must be recoverable from its own
+               # record. stl_path was declared on CandidateRecord and
+               # serialised, but never passed -- every record carried "".
+               "stl_path": gate.stl_path or "",
                "cfd_force_report": cfd,
                "mass_report": mass_report,
                "com_report": mass_report,

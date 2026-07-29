@@ -391,21 +391,52 @@ def _write_tetra(path: Path) -> None:
     path.write_text("\n".join(out) + "\n")
 
 
+
+def test_a_blacklisted_point_is_skipped_instead_of_re_run():
+    """The failure memory is READ, not just written.
+
+    Before this, every sweep recorded failures into FailureRegionMemory and
+    nothing ever consulted it -- so the refined sweep, which steps 0.5 mm
+    inside the 1.0 mm failure radius the coarse sweep had just filled, spent a
+    full CFD budget re-running wheelbases that had already died three times.
+    """
+    import wheelbase_sweep as ws
+    from evolutionary import FailureRegionMemory
+    from optimizer_contract import CandidateOutcome
+
+    mem = FailureRegionMemory(region_radius_mm=1.0, kill_threshold=3)
+    for i in range(3):
+        mem.record_failure(CandidateOutcome(
+            candidate_id=f"dead{i}", W_mm=120.0, x_front_mm=46.0, d_halo_mm=30.0,
+            lifecycle_state="geometry_rejected", T_raw=None, T_penalized=None,
+            failure_reason="interior forced-air region"))
+
+    seen = []
+    real = ws.optimize_single_w
+
+    def fake(bindings, config, W, xf, d, *a, **kw):
+        seen.append(d)
+        return ws.WResult(W_mm=W, best=None, all_outcomes=[], best_phi_grids=None)
+
+    ws.optimize_single_w = fake
+    try:
+        ws.run_d_halo_sweep(
+            bindings=None, config=None, d_halo_list=[20.0, 30.0, 40.0],
+            W_mm=120.0, x_front_mm=46.0, n_candidates=1, out_dir=".",
+            gradient_weights=None, failure_memory=mem, n_evolution_rounds=1,
+        )
+    finally:
+        ws.optimize_single_w = real
+
+    assert 30.0 not in seen, f"blacklisted d_halo=30 was still run: {seen}"
+    assert seen == [20.0, 40.0], f"non-blacklisted values were skipped too: {seen}"
+
+
 if __name__ == "__main__":
-    for t in (
-        test_d_halo_values_respect_both_physical_bounds,
-        test_part1_and_part3_agree_on_the_d_halo_floor,
-        test_refined_d_halo_values_stay_legal,
-        test_d_halo_values_rejects_a_degenerate_range,
-        test_sweep_varies_d_halo_and_holds_W_and_x_front_fixed,
-        test_iteration_budget_is_not_silently_discarded,
-        test_ground_plane_sits_on_the_track_with_a_rolling_road,
-        test_cfd_stl_is_under_budget_and_still_meets_part2_contract,
-        test_prerequisite_gate_blocks_an_unvalidated_sweep,
-        test_stage1_cargo_placement_reaches_the_built_geometry,
-        test_launch_com_blends_the_propellant_and_excludes_it_from_totals,
-        test_stability_gets_front_axle_origin_not_nose_origin,
-    ):
-        _run(t)
+    # Collected by name. A hand-written call list silently drops every test
+    # appended after it -- that bug has already hidden four tests in this repo.
+    _mod = sys.modules[__name__]
+    for _n in sorted(n for n in dir(_mod) if n.startswith("test_")):
+        _run(getattr(_mod, _n))
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

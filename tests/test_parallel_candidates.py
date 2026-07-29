@@ -97,25 +97,30 @@ def test_concurrent_run_directory_names_do_not_collide():
     import inspect
     import openfoam_adjoint as oa
 
+    assert "uuid4" in inspect.getsource(oc.new_run_dir_name), (
+        "run dir naming is no longer uuid4-based; concurrent candidates could "
+        "collide and rmtree each other's case")
     for mod, fn in (("openfoam_case", oc.invoke), ("openfoam_adjoint", oa.invoke_adjoint)):
-        src = inspect.getsource(fn)
-        assert "uuid4" in src, (
-            f"{mod} does not use uuid4 for its run dir; concurrent candidates "
-            f"could collide and delete each other's case")
+        assert "new_run_dir_name" in inspect.getsource(fn), (
+            f"{mod} builds its run dir some other way than the shared helper")
 
+    # Call PRODUCTION's naming, not a local re-implementation. The first
+    # version of this test built `run_{pid}_{uuid4hex}` itself and asserted 64
+    # were unique -- which tests the uuid stdlib, not this pipeline, and would
+    # stay green if openfoam_case reverted to hash(stl_path) % 10000.
     names = set()
     lock = threading.Lock()
 
     def make_name():
-        import os
-        import uuid as _uuid
-        n = f"run_{os.getpid()}_{_uuid.uuid4().hex[:12]}"
+        n = oc.new_run_dir_name()
         with lock:
             names.add(n)
         return n
 
     run_candidates_parallel([make_name for _ in range(64)], max_workers=8)
-    assert len(names) == 64, f"only {len(names)} unique run-dir names from 64 tasks"
+    assert len(names) == 64, (
+        f"only {len(names)} unique run-dir names from 64 concurrent tasks; "
+        f"colliding names mean one candidate rmtree's a live sibling's case")
 
 
 def test_serial_and_parallel_agree():

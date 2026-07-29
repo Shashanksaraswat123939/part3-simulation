@@ -309,6 +309,20 @@ def run_wheelbase_sweep(
     results: list[WResult] = []
     warm: Optional[dict] = None
     for w in sorted(w_values):
+        # The only READ of the failure memory. Everything above records into it
+        # and nothing consulted it, so the refined sweep -- which runs at 0.5 mm
+        # spacing around the top W values, i.e. well inside the 1.0 mm failure
+        # radius the coarse sweep just populated -- happily re-spent a full CFD
+        # budget on wheelbases that had already died three times.
+        if failure_memory is not None and failure_memory.is_blacklisted(
+            w, x_front_mm, d_halo_mm
+        ):
+            reasons = {r.failure_reason for r
+                       in failure_memory.failures_near(w, x_front_mm, d_halo_mm)}
+            print(f"[sweep] skipping W={w} mm: blacklisted after "
+                  f"{len(failure_memory.failures_near(w, x_front_mm, d_halo_mm))} "
+                  f"nearby failures ({'; '.join(sorted(filter(None, reasons)))})")
+            continue
         result = optimize_single_w(
             bindings, config, w, x_front_mm, d_halo_mm, n_candidates, out_dir,
             gradient_weights, warm_start_grids=warm,
@@ -354,6 +368,15 @@ def run_d_halo_sweep(
     results: list[WResult] = []
     warm: Optional[dict] = None
     for d in sorted(d_halo_list):
+        if failure_memory is not None and failure_memory.is_blacklisted(
+            W_mm, x_front_mm, d
+        ):
+            near = failure_memory.failures_near(W_mm, x_front_mm, d)
+            reasons = {r.failure_reason for r in near}
+            print(f"[sweep] skipping d_halo={d} mm: blacklisted after "
+                  f"{len(near)} nearby failures "
+                  f"({'; '.join(sorted(filter(None, reasons)))})")
+            continue
         result = optimize_single_w(
             bindings, config, W_mm, x_front_mm, d, n_candidates, out_dir,
             gradient_weights, warm_start_grids=warm,

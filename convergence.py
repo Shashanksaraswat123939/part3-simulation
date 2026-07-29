@@ -3,7 +3,8 @@ convergence.py — Part 3 Stage 5: inner-loop convergence criteria.
 
 Spec ("Convergence Criteria", 03_optimizer_workflow) — stop inner loop when:
 
-    |T_penalized(iter) - T_penalized(iter-1)| < 1 ms
+    |T_penalized(iter) - T_penalized(iter-1)| < 1 ms, for N CONSECUTIVE
+        iterations (a single sub-ms delta is noise -- see update_success)
     OR gradient norm < threshold
     OR candidate fails gates repeatedly (3+ consecutive iterations)
     OR iteration budget exhausted
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from optimizer_contract import (
+    INNER_CONVERGENCE_CONSECUTIVE,
     INNER_CONVERGENCE_DELTA_T_S,
     MAX_CONSECUTIVE_GATE_FAILURES,
 )
@@ -56,6 +58,7 @@ class ConvergenceTracker:
         gradient_norm_threshold: float,
         delta_t_threshold_s: float = INNER_CONVERGENCE_DELTA_T_S,
         max_consecutive_gate_failures: int = MAX_CONSECUTIVE_GATE_FAILURES,
+        required_small_steps: int = INNER_CONVERGENCE_CONSECUTIVE,
     ) -> None:
         if iteration_budget < 1:
             raise ValueError("iteration_budget must be >= 1")
@@ -65,12 +68,16 @@ class ConvergenceTracker:
             raise ValueError("delta_t_threshold_s must be positive finite")
         if max_consecutive_gate_failures < 1:
             raise ValueError("max_consecutive_gate_failures must be >= 1")
+        if required_small_steps < 1:
+            raise ValueError("required_small_steps must be >= 1")
         self._budget = iteration_budget
         self._grad_threshold = gradient_norm_threshold
         self._delta_t = delta_t_threshold_s
         self._max_fail = max_consecutive_gate_failures
+        self._required_small_steps = required_small_steps
         self._iterations = 0
         self._consecutive_failures = 0
+        self._consecutive_small_steps = 0
         self._last_T: Optional[float] = None
 
     @property
@@ -95,9 +102,30 @@ class ConvergenceTracker:
         self._iterations += 1
         self._consecutive_failures = 0
 
+        # CONSECUTIVE small steps, not one.
+        #
+        # A single |dT| below threshold used to end the run and report
+        # converged=True. Measured 2026-07-28: a production run stopped after
+        # ONE update on dT = 0.372 ms, while the pipeline's drag noise is about
+        # +/-15 ms of race time -- so that delta was indistinguishable from
+        # zero, and stopping on it declared success on noise. Under a noisy
+        # measurement a small delta by chance is likely, not rare, so a
+        # single-sample test fires more or less at random.
+        #
+        # Requiring several in a row is the standard remedy and costs nothing
+        # when the objective really has flattened: it just takes N iterations to
+        # say so. This makes the criterion STRICTER, not looser -- it was
+        # producing false convergence, which is the expensive direction.
         if self._last_T is not None and abs(T_penalized - self._last_T) < self._delta_t:
+            self._consecutive_small_steps += 1
             self._last_T = T_penalized
-            return ConvergenceStatus(stop=True, reason=REASON_DELTA_T, converged=True)
+            if self._consecutive_small_steps >= self._required_small_steps:
+                return ConvergenceStatus(stop=True, reason=REASON_DELTA_T,
+                                         converged=True)
+            # Budget still applies while we wait for the run of small steps --
+            # returning a bare "keep going" here would let the loop overrun it.
+            return self._budget_check()
+        self._consecutive_small_steps = 0
         self._last_T = T_penalized
 
         if gradient_norm < self._grad_threshold:

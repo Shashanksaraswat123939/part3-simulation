@@ -87,6 +87,16 @@ D_HALO_PLACEMENT_MARGIN_MM: float = 34.0   # 50mm pocket - 16mm Ref_A offset
 # ---------------------------------------------------------------------------
 
 INNER_CONVERGENCE_DELTA_T_S: float = 1e-3       # |ΔT_penalized| < 1 ms
+# ...and it must hold for this many CONSECUTIVE iterations before the inner loop
+# calls itself converged.
+#
+# 1 ms is far below what this pipeline can resolve: measured CFD drag noise is
+# about +/-15 ms of race time, so a single sub-millisecond delta says nothing.
+# A production run on 2026-07-28 stopped after ONE update on dT = 0.372 ms and
+# reported converged=True -- convergence declared on noise. Three in a row is
+# very unlikely to happen by chance and costs only a couple of iterations when
+# the objective genuinely has flattened.
+INNER_CONVERGENCE_CONSECUTIVE: int = 3
 DEFAULT_GRADIENT_NORM_THRESHOLD: float = 1e-6
 MAX_CONSECUTIVE_GATE_FAILURES: int = 3          # "3+ consecutive iterations"
 DEFAULT_ITERATION_BUDGET: int = 100

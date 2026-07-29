@@ -59,9 +59,20 @@ def test_search_ranking_and_final_ranking_are_different_by_design():
 
 
 def test_convergence_good_stop_reasons():
+    # The delta-T criterion now needs N CONSECUTIVE small steps. This test used
+    # to assert that ONE sub-threshold step converged, which is the behaviour
+    # that stopped a real run after a single 0.372 ms delta against a +/-15 ms
+    # noise floor -- convergence declared on noise.
+    from optimizer_contract import INNER_CONVERGENCE_CONSECUTIVE
     delta = ConvergenceTracker(iteration_budget=10, gradient_norm_threshold=1.0e-9)
     assert not delta.update_success(1.5000, 1.0).stop
-    status = delta.update_success(1.5005, 1.0)
+    status = None
+    for i in range(INNER_CONVERGENCE_CONSECUTIVE):
+        status = delta.update_success(1.5000 + (i + 1) * 5e-5, 1.0)
+        if i < INNER_CONVERGENCE_CONSECUTIVE - 1:
+            assert not status.stop, (
+                f"stopped after {i + 1} small step(s); "
+                f"{INNER_CONVERGENCE_CONSECUTIVE} are required")
     assert status.stop
     assert status.converged
     assert status.reason == REASON_DELTA_T
@@ -88,3 +99,50 @@ if __name__ == "__main__":
     test_search_ranking_and_final_ranking_are_different_by_design()
     test_convergence_good_stop_reasons()
     test_convergence_failure_stop_reason()
+
+
+def test_single_small_step_does_not_declare_convergence():
+    """A production run stopped after ONE update on dT = 0.372 ms and reported
+    converged=True, while the pipeline's drag noise is about +/-15 ms of race
+    time. Under a noisy measurement a small delta by chance is likely, so a
+    single-sample test fires at random."""
+    from convergence import ConvergenceTracker, REASON_DELTA_T
+    t = ConvergenceTracker(iteration_budget=50, gradient_norm_threshold=1e-12)
+    t.update_success(3.2068, 1.0)
+    s = t.update_success(3.20643, 1.0)          # dT = 0.37 ms
+    assert not s.stop, "stopped on a single sub-threshold step"
+    assert s.reason != REASON_DELTA_T
+
+
+def test_consecutive_small_steps_do_declare_convergence():
+    from convergence import ConvergenceTracker, REASON_DELTA_T
+    from optimizer_contract import INNER_CONVERGENCE_CONSECUTIVE
+    t = ConvergenceTracker(iteration_budget=50, gradient_norm_threshold=1e-12)
+    t.update_success(3.2000, 1.0)
+    last = None
+    for i in range(INNER_CONVERGENCE_CONSECUTIVE):
+        last = t.update_success(3.2000 + (i + 1) * 1e-6, 1.0)
+    assert last.stop and last.converged and last.reason == REASON_DELTA_T, (
+        f"expected convergence after {INNER_CONVERGENCE_CONSECUTIVE} small "
+        f"steps, got {last}")
+
+
+def test_a_big_step_resets_the_small_step_run():
+    from convergence import ConvergenceTracker
+    t = ConvergenceTracker(iteration_budget=50, gradient_norm_threshold=1e-12)
+    t.update_success(3.2000, 1.0)
+    t.update_success(3.2000 + 1e-6, 1.0)        # small
+    t.update_success(3.3000, 1.0)               # big -- resets
+    s = t.update_success(3.3000 + 1e-6, 1.0)    # small again, run length 1
+    assert not s.stop, "the small-step run should have reset after a big step"
+
+
+def test_budget_still_applies_while_waiting_for_small_steps():
+    from convergence import ConvergenceTracker, REASON_BUDGET
+    t = ConvergenceTracker(iteration_budget=3, gradient_norm_threshold=1e-12,
+                           required_small_steps=99)
+    t.update_success(3.2000, 1.0)
+    t.update_success(3.2000 + 1e-6, 1.0)
+    s = t.update_success(3.2000 + 2e-6, 1.0)
+    assert s.stop and s.reason == REASON_BUDGET, (
+        f"budget must still stop the loop while a small-step run accumulates, got {s}")

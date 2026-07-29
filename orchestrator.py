@@ -81,7 +81,17 @@ class SearchResult:
             "predicted_T_penalized_s": c.T_penalized,
             "candidate_record_path": c.record_path,
             "candidate_records_dir": out_dir,
+            # An empty list here means NOT RUN, not "ran and found nothing" --
+            # no entry point passes a robustness_runner today, so this is
+            # always empty and reads like a clean bill of health. Say which.
             "robustness_reports": [r.summary() for r in self.robustness_reports],
+            "robustness_status": (
+                "run" if self.robustness_reports else
+                "NOT RUN -- no robustness_runner was passed to the search; the "
+                "spec's six checks (mass +/-1 g, COM height, mu, thrust +/-5%, "
+                "surface perturbation, mesh refinement) have not been "
+                "evaluated for this candidate"
+            ),
             "backup_ranking": [
                 {"candidate_id": b.candidate_id, "W_mm": b.W_mm,
                  "T_raw_s": b.T_raw, "record_path": b.record_path}

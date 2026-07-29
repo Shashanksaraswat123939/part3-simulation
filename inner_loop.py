@@ -320,6 +320,25 @@ def _run_single_iteration(
 
     penalties = penalty_provider(gate)
     T_penalized = compose_penalized_time(objective.T_com_penalized, penalties)
+    # ⚠ THIS CANNOT TRIGGER CONVERGENCE, and it is recorded rather than trusted.
+    #
+    # The tracker stops when gradient_norm < DEFAULT_GRADIENT_NORM_THRESHOLD
+    # (1e-6). But this is the norm of the SCALAR objective sensitivities
+    # (dT/dD20, dT/dmass, ...), which never approach zero: a lighter car is
+    # always faster, so dT/dmass alone sits at 18-29 s/kg whatever the shape.
+    # Measured 2026-07-28 at the live operating point: norm = 17.60, i.e.
+    # 1.76e+07x the threshold, and sweeping mass 48-300 g against drag
+    # 0.05-3 N never brings it below 6.03 -- still 6e+06x above.
+    #
+    # So the gradient criterion is DEAD: one of the four documented stop
+    # conditions can never fire. It is not harmful (budget, delta-T and gate
+    # failures all work), but it looks like a safety net and is not one.
+    #
+    # The quantity that DOES vanish at a shape optimum is the SHAPE gradient
+    # dT/dSurface -- the field phi_updater actually steps along. Making this
+    # criterion real means returning that field's norm from
+    # apply_adjoint_to_unified and threading it through update_phi to here,
+    # rather than reusing the scalar norm because it was the number in scope.
     grad_norm = scalar_gradient_norm(objective.gradients)
 
     # Step 9: stability check — computed and recorded; static instability is

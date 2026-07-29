@@ -94,11 +94,6 @@ def test_convergence_failure_stop_reason():
     assert status.reason == REASON_GATE_FAILURES
 
 
-if __name__ == "__main__":
-    test_penalized_time_composition()
-    test_search_ranking_and_final_ranking_are_different_by_design()
-    test_convergence_good_stop_reasons()
-    test_convergence_failure_stop_reason()
 
 
 def test_single_small_step_does_not_declare_convergence():
@@ -146,3 +141,56 @@ def test_budget_still_applies_while_waiting_for_small_steps():
     s = t.update_success(3.2000 + 2e-6, 1.0)
     assert s.stop and s.reason == REASON_BUDGET, (
         f"budget must still stop the loop while a small-step run accumulates, got {s}")
+
+
+def test_gradient_norm_criterion_is_known_dead_not_assumed_live():
+    """Pins a measured fact so nobody trusts a stop condition that cannot fire.
+
+    The tracker stops when gradient_norm < DEFAULT_GRADIENT_NORM_THRESHOLD
+    (1e-6), but it is fed the norm of the SCALAR objective sensitivities, which
+    never approach zero -- dT/dmass alone is 18-29 s/kg whatever the shape.
+    Measured 2026-07-28: 17.60 at the live operating point (1.76e+07x the
+    threshold) and never below 6.03 across mass 48-300 g x drag 0.05-3 N.
+
+    If someone later feeds this criterion the SHAPE gradient (the field that
+    does vanish at an optimum), this test should fail and be replaced -- that
+    would be the fix, not a regression.
+    """
+    import os, sys
+    import numpy as np
+    _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(_root, "part2-simulation"))
+    from gradient_combiner import scalar_gradient_norm
+    from optimizer_contract import DEFAULT_GRADIENT_NORM_THRESHOLD
+    from race_objective import build_smooth_sheet_model
+    from race_objective_adapter import race_value_and_grad_guarded
+
+    model = build_smooth_sheet_model(
+        os.path.join(_root, "part2-simulation", "co2_thrust_data.csv"))
+    p = np.array([0.7149, 0.158598, 0.010, 1e-7, 1.0, 0.0292, 0.02, 0.10],
+                 dtype=np.float64)
+    norm = scalar_gradient_norm(race_value_and_grad_guarded(p, model)[2])
+    assert norm > 1.0, f"scalar gradient norm collapsed to {norm}; re-check the objective"
+    assert norm > 1e6 * DEFAULT_GRADIENT_NORM_THRESHOLD, (
+        f"norm {norm} is now within reach of the {DEFAULT_GRADIENT_NORM_THRESHOLD} "
+        f"threshold -- if the criterion has been made live, update this test")
+
+
+if __name__ == "__main__":
+    # Collected by name so an appended test can never be silently skipped --
+    # the previous hand-written list sat ABOVE the tests added later, so they
+    # were defined and never called.
+    import sys as _sys
+    _mod = _sys.modules[__name__]
+    _fns = sorted(n for n in dir(_mod) if n.startswith("test_"))
+    _passed = _failed = 0
+    for _n in _fns:
+        try:
+            getattr(_mod, _n)()
+            print(f"PASS {_n}")
+            _passed += 1
+        except Exception as _e:  # noqa: BLE001
+            print(f"FAIL {_n}: {_e!r}")
+            _failed += 1
+    print(f"{_passed} passed, {_failed} failed")
+    _sys.exit(1 if _failed else 0)

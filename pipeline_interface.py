@@ -38,6 +38,16 @@ class GateOutcome:
     stl_half_path: Optional[str]
     failure_reason: Optional[str]
     meshes: Optional[dict] = None
+    # Surface area the cutter cannot reach, mm^2. None when not measured.
+    #
+    # extract_unified_surface computes this and run_quality_gates read it once,
+    # to pick between the strings "geometry_repaired" and "valid_simulated", and
+    # then dropped the number. So the one quantity that says HOW unmanufacturable
+    # a candidate is never left the function that computed it: every record in
+    # the 2026-07-29 sweep says "geometry_repaired" and none says by how much.
+    # It matters more now that the optimiser actually carves -- an organic shape
+    # has real accessibility problems where the starting envelope had few.
+    inaccessible_area_mm2: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -683,11 +693,18 @@ def unified_bindings(
         # allow_inaccessible carries a manufacturing penalty rather than
         # rejecting -> a repaired-but-valid candidate, per the spec's failure
         # table (large accessibility failure = penalty, continue).
-        state = "geometry_repaired" if report["inaccessible_area_mm2"] else "valid_simulated"
+        # A per-COMPONENT dict {name: mm^2}, not a scalar -- the old
+        # `if report["inaccessible_area_mm2"]` was testing a dict for
+        # truthiness, which is why it never noticed. Summed for the record;
+        # the breakdown stays in the extraction report.
+        _areas = report["inaccessible_area_mm2"]
+        inaccessible = float(sum(_areas.values())) if isinstance(_areas, dict)             else float(_areas or 0.0)
+        state = "geometry_repaired" if inaccessible else "valid_simulated"
         return GateOutcome(
             lifecycle_state=state, phi_snapshot_paths=snaps,
             stl_path=stl_path, stl_half_path=stl_half,
             failure_reason=None, meshes={"car": mesh},
+            inaccessible_area_mm2=inaccessible,
         )
 
     def compute_mass_report(geom):

@@ -95,13 +95,41 @@ class InnerLoopResult:
 PenaltyProvider = Callable[[object], PenaltyInputs]
 
 
-def zero_penalties(_gate_outcome: object) -> PenaltyInputs:
+_ZERO_PENALTY_WARNED = set()
+
+
+def zero_penalties(gate_outcome: object) -> PenaltyInputs:
     """Explicit zero penalties. Used when Part 1 has not yet emitted
     manufacturing-penalty magnitudes for repaired-but-penalized geometry.
     Deliberately a named function so the choice shows up in code review —
     do NOT let this silently become the permanent behavior; the spec's
     'Accessibility failure (large) → assign manufacturing penalty, continue'
-    path needs a real magnitude eventually."""
+    path needs a real magnitude eventually.
+
+    It became the permanent behaviour. No caller has ever passed a different
+    provider, so compose_penalized_time has only ever added 0.0 and every
+    candidate in the 2026-07-29 sweep was logged "geometry_repaired" -- meaning
+    the accessibility check DID find unreachable surface -- while paying nothing
+    for it. That is free rein to evolve an unmanufacturable shape, and it costs
+    more now that the optimiser actually carves.
+
+    Still returns zero, because the right magnitude is a calibration decision
+    and inventing a coefficient here would be worse than the gap: a made-up
+    penalty silently reranks candidates and looks principled. But it warns once
+    per candidate with the measured area attached, so the gap is visible in the
+    log rather than inferred from source.
+    """
+    area = getattr(gate_outcome, "inaccessible_area_mm2", None)
+    cid = getattr(gate_outcome, "stl_path", None) or "?"
+    if area and cid not in _ZERO_PENALTY_WARNED:
+        _ZERO_PENALTY_WARNED.add(cid)
+        warnings.warn(
+            f"{area:.1f} mm^2 of this candidate's surface is unreachable by the "
+            f"cutter, and the manufacturing penalty applied for it is 0.0 s. No "
+            f"caller passes a penalty_provider, so unmanufacturable geometry "
+            f"ranks exactly as well as manufacturable geometry. Set one before "
+            f"trusting a final ranking.",
+            RuntimeWarning, stacklevel=2)
     return PenaltyInputs(manufacturing_penalty_s=0.0, rule_margin_penalty_s=0.0)
 
 
@@ -427,6 +455,7 @@ def _run_single_iteration(
                # record. stl_path was declared on CandidateRecord and
                # serialised, but never passed -- every record carried "".
                "stl_path": gate.stl_path or "",
+               "inaccessible_area_mm2": gate.inaccessible_area_mm2,
                "cfd_force_report": cfd,
                "mass_report": mass_report,
                "com_report": mass_report,

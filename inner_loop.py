@@ -31,6 +31,7 @@ Design decisions recorded here (and enforced by tests):
 
 from __future__ import annotations
 
+import os
 import math
 import traceback
 import warnings
@@ -433,6 +434,24 @@ def _run_single_iteration(
         # is what silently broke every phi update; see AdjointOutcome's
         # docstring.
         adjoint = bindings.run_adjoint(gate.stl_half_path, w_D20)
+        # SAVE IT. The sensitivity field is the expensive product of this
+        # iteration -- roughly 25 minutes of adjointOptimisationFoam -- and it
+        # was splatted onto the grid and then dropped. CandidateRecord has
+        # declared `adjoint_sensitivity_field_path` since the beginning, the
+        # serialiser writes it and the reader reads it, and NOTHING has ever
+        # set it: every record carries "".
+        #
+        # It is also the analysis output this project exists to produce. Without
+        # the field you cannot see where drag sensitivity concentrates, compare
+        # it across d_halo, or check the adjoint against a finite difference
+        # after the fact -- the phi snapshots say what the shape became, never
+        # why. ~6 MB compressed per iteration against the 154 MB STL already
+        # written beside it.
+        #
+        # Vertices travel WITH it, for the reason AdjointOutcome's docstring
+        # gives: sensitivity[i] belongs to half_mesh.vertices[i] and the array
+        # alone carries no indexing.
+        sens_path = _try_save_sensitivity(adjoint, iter_id, out_dir)
         bindings.update_phi(
             phi_grids, adjoint.sensitivity, adjoint.half_mesh, config.hj_dt,
             gradient_weights, objective.gradients, mass_report,
@@ -472,6 +491,7 @@ def _run_single_iteration(
                # serialised, but never passed -- every record carried "".
                "stl_path": gate.stl_path or "",
                "inaccessible_area_mm2": gate.inaccessible_area_mm2,
+               "adjoint_sensitivity_field_path": sens_path,
                "cfd_force_report": cfd,
                "mass_report": mass_report,
                "com_report": mass_report,
@@ -491,6 +511,39 @@ def _run_single_iteration(
         D20=cfd.D20, total_mass_kg=mass_report.total_mass_kg,
     )
     return outcome, log, snaps
+
+
+def _try_save_sensitivity(adjoint, iter_id: str, out_dir: str) -> Optional[str]:
+    """Persist the adjoint surface sensitivity and the vertices it indexes.
+
+    Same rule as _try_write_record: saving an artefact must never take the loop
+    down. A failed save costs the post-hoc analysis, not the optimisation.
+    """
+    try:
+        import numpy as _np
+        sens = _np.asarray(adjoint.sensitivity)
+        mesh = getattr(adjoint, "half_mesh", None)
+        verts = None if mesh is None else _np.asarray(mesh.vertices)
+        if verts is not None and len(verts) != len(sens):
+            # Not fatal here -- update_phi validates this properly -- but the
+            # saved pair would be meaningless, so say so rather than write it.
+            warnings.warn(
+                f"{iter_id}: {len(sens)} sensitivity values against "
+                f"{len(verts)} vertices; not saving an unindexable field.",
+                RuntimeWarning, stacklevel=2)
+            return None
+        path = os.path.join(out_dir, f"sens_{iter_id}.npz")
+        _np.savez_compressed(
+            path, sensitivity=sens.astype(_np.float32),
+            vertices=(_np.empty((0, 3), dtype=_np.float32) if verts is None
+                      else verts.astype(_np.float32)))
+        return path
+    except Exception as exc:  # noqa: BLE001
+        warnings.warn(
+            f"{iter_id}: could not save the adjoint sensitivity field ({exc}). "
+            f"The optimisation continues; the field is lost for analysis.",
+            RuntimeWarning, stacklevel=2)
+        return None
 
 
 def _try_write_record(bindings: PipelineBindings, outcome: CandidateOutcome,

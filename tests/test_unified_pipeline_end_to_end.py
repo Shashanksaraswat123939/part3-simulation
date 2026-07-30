@@ -165,17 +165,75 @@ def test_symmetry_snap_refuses_a_genuinely_broken_half():
     raise AssertionError("a 5 mm excursion was silently snapped")
 
 
+
+
+def test_the_adjoint_sensitivity_field_is_saved_for_analysis():
+    """The expensive product of each iteration must survive it.
+
+    CandidateRecord has declared adjoint_sensitivity_field_path since the
+    beginning, the serialiser writes it and the reader reads it, and nothing
+    ever SET it -- every record carried "". So ~25 minutes of
+    adjointOptimisationFoam per iteration was splatted onto the grid and
+    dropped, and the field this project exists to analyse was never on disk.
+    The phi snapshots say what the shape became; only this says why.
+
+    Vertices must travel with it: sensitivity[i] belongs to vertices[i] and the
+    array alone carries no indexing (see AdjointOutcome's docstring).
+    """
+    import inspect
+    import numpy as np
+    import inner_loop as il
+
+    src = inspect.getsource(il._run_single_iteration)
+    assert "_try_save_sensitivity" in src, (
+        "the iteration does not save its adjoint sensitivity field")
+    assert "adjoint_sensitivity_field_path" in src, (
+        "the sensitivity path is not put into the candidate record")
+
+    # Round-trip the saver itself on a realistic pair.
+    import tempfile
+    from types import SimpleNamespace
+    rng = np.random.default_rng(0)
+    n = 500
+    sens = rng.normal(size=n)
+    verts = rng.normal(size=(n, 3))
+    adj = SimpleNamespace(sensitivity=sens,
+                          half_mesh=SimpleNamespace(vertices=verts))
+    with tempfile.TemporaryDirectory() as d:
+        path = il._try_save_sensitivity(adj, "cand_iter0001", d)
+        assert path, "saver returned no path on a valid pair"
+        # `with`, because np.load holds the file open and Windows will not let
+        # TemporaryDirectory remove a file that still has a handle on it.
+        with np.load(path) as z:
+            got_s, got_v = z["sensitivity"], z["vertices"]
+        assert got_s.shape == (n,)
+        assert got_v.shape == (n, 3)
+        assert np.allclose(got_s, sens, atol=1e-6)
+        assert np.allclose(got_v, verts, atol=1e-5)
+
+        # A mismatched pair is unindexable; refuse rather than write nonsense.
+        bad = SimpleNamespace(sensitivity=sens[:10],
+                              half_mesh=SimpleNamespace(vertices=verts))
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            assert il._try_save_sensitivity(bad, "cand_iter0002", d) is None
+        assert any("unindexable" in str(c.message) for c in caught), (
+            "a length mismatch was saved silently")
+
+
 if __name__ == "__main__":
-    fns = [f for f in dir(sys.modules[__name__]) if f.startswith("test_")]
-    passed = failed = 0
-    for name in sorted(fns):
+    # Collected by name; a hand-written call list silently drops every test
+    # appended after it, which has already hidden several tests in this repo.
+    _mod = sys.modules[__name__]
+    _passed = _failed = 0
+    for _n in sorted(n for n in dir(_mod) if n.startswith("test_")):
         try:
-            globals()[name]()
-            passed += 1
-        except SystemExit:
-            raise
-        except Exception as e:  # noqa: BLE001
-            print(f"FAIL {name}: {e!r}")
-            failed += 1
-    print(f"\n{passed} passed, {failed} failed")
-    sys.exit(1 if failed else 0)
+            getattr(_mod, _n)()
+            print("PASS " + _n)
+            _passed += 1
+        except Exception as _e:  # noqa: BLE001
+            print("FAIL %s: %r" % (_n, _e))
+            _failed += 1
+    print("%d passed, %d failed" % (_passed, _failed))
+    sys.exit(1 if _failed else 0)

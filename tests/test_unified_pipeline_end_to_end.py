@@ -222,6 +222,40 @@ def test_the_adjoint_sensitivity_field_is_saved_for_analysis():
             "a length mismatch was saved silently")
 
 
+
+
+def test_an_iteration_that_cannot_be_recorded_as_success_records_a_failure():
+    """_run_single_iteration must ALWAYS produce a record.
+
+    CandidateOutcome.__post_init__ validates lifecycle state, finiteness of
+    T_raw/T_penalized, and T_penalized >= T_raw. That construction sat outside
+    every try, so any of those raising meant neither the success path nor the
+    failure helper wrote anything -- the exception left the function, the
+    candidate died, and (before the sweep printed TaskFailure) nothing said why.
+
+    That is what a real run did: d_halo=16 stopped after 3 of 6 iterations with
+    iteration 3 finishing its CFD, adjoint and phi update and producing no
+    record at all.
+    """
+    import inspect
+    import inner_loop as il
+
+    # Regex on the raw source. Index arithmetic does not work here: the
+    # first `_try_write_record` in the function belongs to the `failure`
+    # helper, so searching backwards from it finds that helper's
+    # CandidateOutcome rather than the success one.
+    import re
+    src = inspect.getsource(il._run_single_iteration)
+    guarded = re.search(
+        r"try:\s*\n\s*outcome = CandidateOutcome\((?:.|\n)*?"
+        r"except[^\n]*\n(?:.|\n)*?return failure\(", src)
+    assert guarded, (
+        "the success CandidateOutcome is not inside a try whose handler "
+        "routes to `failure`; a validation error there escapes "
+        "_run_single_iteration and the iteration vanishes without a "
+        "record of any kind")
+
+
 if __name__ == "__main__":
     # Collected by name; a hand-written call list silently drops every test
     # appended after it, which has already hidden several tests in this repo.

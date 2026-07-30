@@ -468,12 +468,39 @@ def _run_single_iteration(
         )
         return failure("objective_failed", reason, snaps)
 
-    outcome = CandidateOutcome(
-        candidate_id=iter_id, W_mm=W_mm, x_front_mm=x_front_mm, d_halo_mm=d_halo_mm,
-        lifecycle_state=gate.lifecycle_state,
-        T_raw=objective.T_raw, T_penalized=T_penalized,
-        failure_reason=None, phi_snapshot_paths=snaps,
-    )
+    # Guarded, because this function's contract is that EVERY iteration
+    # produces a record -- success or failure -- and this construction was the
+    # one statement left that could escape it. CandidateOutcome.__post_init__
+    # validates: lifecycle state, T_raw/T_penalized present and finite, and
+    # T_penalized >= T_raw. Any of those raising here means neither the success
+    # path below nor `failure` above ever writes anything, the exception leaves
+    # _run_single_iteration entirely, and the candidate dies.
+    #
+    # That is not hypothetical. On 2026-07-30 d_halo=16 stopped after 3 of its 6
+    # iterations: iteration 3 completed its CFD, adjoint and phi update, then
+    # produced no record at all, and the traceback went into a TaskFailure that
+    # nothing read. (The COM penalty was checked as a suspect and cleared -- it
+    # is a degree-4 fit with a clean zero minimum at the 30 mm target and never
+    # goes negative, so T_penalized >= T_raw always holds from that direction.)
+    #
+    # Whatever it turns out to be, an iteration that cannot describe itself as a
+    # success should record itself as a failure, not vanish.
+    try:
+        outcome = CandidateOutcome(
+            candidate_id=iter_id, W_mm=W_mm, x_front_mm=x_front_mm,
+            d_halo_mm=d_halo_mm,
+            lifecycle_state=gate.lifecycle_state,
+            T_raw=objective.T_raw, T_penalized=T_penalized,
+            failure_reason=None, phi_snapshot_paths=snaps,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return failure(
+            "objective_failed",
+            f"iteration completed CFD, adjoint and the phi update but could not "
+            f"be recorded as a success (T_raw={objective.T_raw!r}, "
+            f"T_pen={T_penalized!r}, state={gate.lifecycle_state!r}): {exc}\n"
+            f"{traceback.format_exc(limit=3)}",
+            snaps)
     # Carry the CFD and mass results into the record. Without them a ranked
     # table shows race time and nothing else -- merge_results printed empty D20
     # and mass columns on the first real record, and those are exactly the two

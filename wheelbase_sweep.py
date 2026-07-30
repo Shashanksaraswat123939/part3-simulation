@@ -203,6 +203,24 @@ def optimize_single_w(
         for i, result in enumerate(results):
             if isinstance(result, TaskFailure):
                 task_failures.append(result)
+                # PRINT IT. parallel_runner captures a full traceback into
+                # TaskFailure.traceback_text and, before this, nothing in the
+                # codebase ever read that field -- the failure was appended to a
+                # list, carried to WResult, and never surfaced. A candidate
+                # could die mid-sweep with a complete stack trace in hand and
+                # the only evidence in the log was a missing record file.
+                #
+                # That is exactly what happened on 2026-07-30: d_halo=16 stopped
+                # after 3 of 6 iterations, iteration 3 finished its CFD, adjoint
+                # and phi update and then wrote no record, and there was nothing
+                # anywhere saying why. Both record-writing paths in
+                # _run_single_iteration were accounted for, so the exception had
+                # to have escaped the function entirely -- which is precisely
+                # the case this swallows.
+                print(f"[sweep] CANDIDATE FAILED: task {result.task_index} "
+                      f"({candidate_prefix}_W{W_mm:g}_c{result.task_index}"
+                      f"_r{round_idx}): {result.message}\n{result.traceback_text}",
+                      flush=True)
                 continue
             latest[i] = result
             if result.best is not None:

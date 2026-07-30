@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from dataclasses import dataclass, fields
 from typing import Any, Callable, Optional
 
@@ -578,7 +579,7 @@ def unified_bindings(
     try:
         from unified_phi import (
             build_unified_geometry, enforce_symmetry, extract_unified_surface,
-            compute_mass_com, extract_half_surface,
+            compute_mass_com, extract_half_surface, remap_geometry,
         )
         from phi_updater import apply_adjoint_to_unified
     except ImportError as exc:
@@ -652,12 +653,42 @@ def unified_bindings(
         return geom
 
     def warm_start_phi_fields(prev_geom, W_mm, x_front_mm, d_halo_mm):
-        # Rebuild fresh at the new geometry (documented scope-down; a true φ
-        # remap across a resized envelope is a separate task, same caveat the
-        # four-grid warm_start_phi_fields carries).
-        geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm,
-                                      init_mode="full",
-                                      cargo_placement=cargo_placement)
+        # Actually warm-start. This used to rebuild a fresh envelope and throw
+        # prev_geom away -- "a documented scope-down; a true phi remap across a
+        # resized envelope is a separate task" -- except remap_geometry is that
+        # task, it has been written and tested since, and it had no production
+        # caller at all.
+        #
+        # It cost nothing while the optimiser was a no-op: a rebuild and a warm
+        # start both produced the same 149 g envelope, because carving never
+        # happened. Now that a step removes ~7 g, discarding the field means
+        # every d_halo after the first restarts from the envelope and every CFD
+        # solve spent carving the previous one is thrown away. With six
+        # iterations per d_halo that is most of the run.
+        #
+        # Measured on a carved car at 1 mm, four steps in: 97.0% of the carved
+        # mass survives a remap to d_halo=16 and 94.6% to d_halo=43.72, with
+        # |grad phi| = 1.000, a watertight single-body extraction, and a further
+        # update that still removes material. The residual few percent is the
+        # halo pocket moving, which is the point of changing d_halo.
+        #
+        # Falls back to a rebuild rather than failing the candidate: a remap can
+        # legitimately refuse (the cargo has to fit the new pocket), and losing
+        # the warm start is much cheaper than losing the d_halo.
+        try:
+            geom = remap_geometry(prev_geom, W_mm=W_mm, x_front_mm=x_front_mm,
+                                  d_halo_mm=d_halo_mm,
+                                  cargo_placement=cargo_placement)
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"warm start to d_halo={d_halo_mm} could not remap the evolved "
+                f"field ({type(exc).__name__}: {exc}); rebuilding a fresh "
+                f"envelope instead. This candidate starts from scratch and the "
+                f"CFD solves spent carving the previous one are lost.",
+                RuntimeWarning, stacklevel=2)
+            geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm,
+                                          init_mode="full",
+                                          cargo_placement=cargo_placement)
         enforce_symmetry(geom)
         return geom
 

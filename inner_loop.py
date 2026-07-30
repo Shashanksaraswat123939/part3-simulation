@@ -196,6 +196,19 @@ def run_inner_loop(
             gradient_weights, penalty_provider, iteration,
         )
         history.append(log)
+        # One line per iteration, unconditionally. Without it a run that ends
+        # early is undiagnosable from the log: the 2026-07-30 split4 run stopped
+        # d_halo=16 after 3 of its 6 iterations and the only evidence was a
+        # missing record file and an STL timestamp. Records are written for
+        # successes and most failures, but the loop's own view -- which
+        # iteration, what state, what it decided next -- was never printed.
+        print(f"[inner_loop] {candidate_id} iter {log.iteration}: "
+              f"{log.lifecycle_state}"
+              f"  T_raw={log.T_raw}  T_pen={log.T_penalized}"
+              f"  D20={log.D20}  mass={log.total_mass_kg}"
+              f"  record={'yes' if log.record_path else 'NO'}"
+              + (f"  FAILED: {log.failure_reason}" if log.failure_reason else ""),
+              flush=True)
 
         if outcome is not None and outcome.T_penalized is not None:
             if best is None or outcome.T_penalized < best.T_penalized:
@@ -228,6 +241,9 @@ def run_inner_loop(
             record_path=best.record_path,
         )
 
+    print(f"[inner_loop] {candidate_id} STOPPED after {len(history)} "
+          f"iteration(s): {stop_reason}"
+          f"  (budget was {config.iteration_budget})", flush=True)
     return InnerLoopResult(
         candidate_id=candidate_id,
         W_mm=W_mm,

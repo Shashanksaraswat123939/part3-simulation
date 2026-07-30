@@ -134,12 +134,40 @@ def test_serial_and_parallel_agree():
         "serial and threaded paths disagree")
 
 
+
+
+def test_a_failed_candidate_is_printed_not_just_collected(capsys=None):
+    """TaskFailure.traceback_text must reach a human.
+
+    parallel_runner captures a full traceback for every candidate that dies,
+    and until 2026-07-30 nothing in the codebase read that field: the failure
+    was appended to a list, carried to WResult, and never printed. A candidate
+    could crash mid-sweep with a complete stack trace in hand and the only
+    evidence was a missing record file -- which is exactly how a real run's
+    d_halo=16 stopped after 3 of 6 iterations with no explanation anywhere.
+    """
+    import inspect
+    import wheelbase_sweep as ws
+
+    src = inspect.getsource(ws.optimize_single_w)
+    assert "traceback_text" in src, (
+        "the sweep collects TaskFailure but never reads its traceback; a "
+        "candidate crash is invisible in the log")
+    # and it must actually be PRINTED, not merely referenced. Comments are
+    # stripped first: the explanation above the print is long enough that a
+    # fixed character window lands inside it.
+    code = " ".join(ln for ln in src.splitlines()
+                    if not ln.lstrip().startswith("#"))
+    idx = code.index("traceback_text")
+    assert "print(" in code[max(0, idx - 300):idx], (
+        "traceback_text is referenced but not printed near the failure branch; "
+        "collecting a traceback nobody reads is the bug this guards")
+
+
 if __name__ == "__main__":
-    for t in (test_every_candidate_returns_exactly_once,
-              test_results_keep_task_order_not_completion_order,
-              test_one_failing_candidate_does_not_take_down_the_batch,
-              test_concurrent_run_directory_names_do_not_collide,
-              test_serial_and_parallel_agree):
-        _run(t)
-    print(f"\n{_passed} passed, {_failed} failed")
+    # Collected by name; a hand-written list drops tests appended after it.
+    _mod = sys.modules[__name__]
+    for _n in sorted(n for n in dir(_mod) if n.startswith("test_")):
+        _run(getattr(_mod, _n))
+    print("%d passed, %d failed" % (_passed, _failed))
     sys.exit(1 if _failed else 0)

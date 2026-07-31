@@ -17,6 +17,7 @@ resolution.
 import dataclasses
 import os
 import sys
+import json
 import tempfile
 from pathlib import Path
 
@@ -254,6 +255,75 @@ def test_an_iteration_that_cannot_be_recorded_as_success_records_a_failure():
         "routes to `failure`; a validation error there escapes "
         "_run_single_iteration and the iteration vanishes without a "
         "record of any kind")
+
+
+
+
+def test_a_whole_run_reaches_final_deliverables():
+    """Nothing has ever reached the END of a run.
+
+    Every real execution has died, been killed, or been invalidated partway
+    through, so the tail of the pipeline -- convergence firing, warm-starting
+    the next d_halo from a CARVED field, ranking, build-candidate selection,
+    final_deliverables -- had never executed once. final_deliverables was tested
+    nowhere at all, and select_build_candidate only against a synthetic failure.
+    That is exactly where the remaining bugs would be: those paths only run on a
+    converged car, and no car had ever converged.
+
+    This drives the real geometry and the real inner loop with mocked CFD, over
+    two d_halo values, at coarse spacing, in minutes rather than the ~10 hours
+    the real solve takes. The CFD mock is crude but MONOTONE in frontal area, so
+    carving genuinely pays and the search has a real gradient to follow.
+    """
+    from optimizer_contract import OptimizerConfig, GradientWeights
+    from orchestrator import SearchResult
+    from objective_policy import final_ranking, select_build_candidate
+    from wheelbase_sweep import run_d_halo_sweep
+
+    with tempfile.TemporaryDirectory() as td:
+        b = _mocked_openfoam_bindings(td)
+        cfg = OptimizerConfig(
+            rtc_validated_against_track_data=True,
+            cfd_pipeline_validated_on_known_geometry=True,
+            mu=0.01, wheel_moi_kg_m2=1e-7,
+            iteration_budget=4, evolution_interval_iters=4, max_workers=1,
+        )
+        gw = GradientWeights(w_aero=1.0, w_mass=1.0, w_com=0.0, w_mfg=0.0)
+
+        results = run_d_halo_sweep(
+            bindings=b, config=cfg, d_halo_list=[18.0, 24.0],
+            W_mm=130.0, x_front_mm=46.0, n_candidates=1, out_dir=td,
+            gradient_weights=gw, n_evolution_rounds=1)
+
+        assert len(results) == 2, f"sweep returned {len(results)} d_halo results"
+        for r in results:
+            assert r.best is not None, (
+                f"d_halo produced no candidate at all; every iteration failed")
+
+        pool = [o for r in results for o in r.all_outcomes if o.is_fully_valid]
+        assert pool, "no fully valid candidate across the whole sweep"
+
+        ranked = final_ranking(pool)
+        build = select_build_candidate(pool)
+        assert build is not None, "ranking produced no build candidate"
+        assert ranked[0].T_raw <= ranked[-1].T_raw, "final_ranking is not sorted"
+
+        # THE tail nobody had run: assemble the deliverables dict.
+        sr = SearchResult(build_candidate=build, backup_ranking=list(ranked[1:3]),
+                          coarse_results=results, refined_results=[])
+        deliverables = sr.final_deliverables(td)
+
+        for key in ("optimal_W_mm", "optimal_x_front_mm", "optimal_d_halo_mm",
+                    "predicted_T_raw_s", "predicted_T_penalized_s",
+                    "candidate_record_path", "robustness_status"):
+            assert key in deliverables, f"final_deliverables is missing {key!r}"
+        assert deliverables["predicted_T_raw_s"] > 0
+        # An empty robustness list must say NOT RUN rather than read as clean.
+        assert "NOT RUN" in deliverables["robustness_status"], (
+            "no robustness_runner was passed, so the status must say so")
+
+        # And it must be JSON-serialisable -- run_optimization writes it out.
+        json.dumps(deliverables, default=str)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,24 @@ def _mocked_openfoam_bindings(td):
     b = unified_bindings(_CSV, _FHW, td)
 
     def fake_cfd(stl_half_path):
-        return CFDOutcome(D20=0.18, L=-0.02, Cm=0.005, A=0.009,
+        # Drag RESPONDS to the geometry. It used to be a hard-coded 0.18 for
+        # every candidate, which meant the aero channel was inert in every test
+        # that used this mock: the adjoint could return anything and the run
+        # would behave identically, so nothing here could catch a regression in
+        # the one coupling the project exists to study. A 25-iteration probe
+        # run made that obvious -- D20 printed 0.18 on all 15 iterations while
+        # the optimiser did pure mass minimisation.
+        #
+        # Frontal area x a fixed Cd, which is the dominant term for a bluff body
+        # and cheap to evaluate: project the half-car onto x and double it. Not
+        # a substitute for CFD, but it makes drag a real function of the shape
+        # so the aero path is exercised rather than short-circuited.
+        m = trimesh.load(stl_half_path, process=False)
+        lo, hi = m.bounds
+        area_half = float((hi[1] - lo[1]) * (hi[2] - lo[2]))
+        A = max(2.0 * area_half, 1e-6)
+        CD, Q = 0.45, 0.5 * 1.225 * 20.0 ** 2      # rho/2 * U^2 at the ref speed
+        return CFDOutcome(D20=CD * Q * A, L=-0.02, Cm=0.005, A=A,
                           converged=True, residual_final=1e-5)
 
     def fake_adjoint(stl_half_path, w):
@@ -272,8 +289,12 @@ def test_a_whole_run_reaches_final_deliverables():
 
     This drives the real geometry and the real inner loop with mocked CFD, over
     two d_halo values, at coarse spacing, in minutes rather than the ~10 hours
-    the real solve takes. The CFD mock is crude but MONOTONE in frontal area, so
-    carving genuinely pays and the search has a real gradient to follow.
+    the real solve takes. The CFD mock returns drag proportional to the
+    bounding-box frontal area -- crude, but a real function of the shape, so the
+    aero path is exercised rather than short-circuited. An earlier version of
+    this docstring claimed that of a mock that returned a constant 0.18 N; it
+    did not, and every test sharing the mock was running with a dead aero
+    channel.
     """
     from optimizer_contract import OptimizerConfig, GradientWeights
     from orchestrator import SearchResult

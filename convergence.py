@@ -26,7 +26,14 @@ from optimizer_contract import (
 )
 
 # Stop reasons — string enum, stable for logging/records.
-REASON_DELTA_T = "delta_T_below_1ms"
+# Not "delta_T_below_1ms". The threshold moved to 15 ms
+# (INNER_CONVERGENCE_DELTA_T_S) once the drag noise was measured at +/-15 ms of
+# race time -- a 1 ms criterion could not fire above the noise floor -- and this
+# label kept claiming 1 ms. It is what a converged run prints as its reason, and
+# the first mocked run to actually reach convergence printed the wrong number.
+# Nothing parses it, so naming it after the criterion rather than a stale
+# constant costs nothing.
+REASON_DELTA_T = "delta_T_below_threshold"
 REASON_GRAD_NORM = "gradient_norm_below_threshold"
 REASON_GATE_FAILURES = "repeated_gate_failures"
 REASON_BUDGET = "iteration_budget_exhausted"

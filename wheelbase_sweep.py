@@ -146,6 +146,27 @@ def optimize_single_w(
         raise ValueError("n_evolution_rounds must be >= 1")
 
     # Seed the population. Candidate 0 warm-starts when fields are supplied.
+    #
+    # Candidates 1..N-1 are PERTURBED. The seed passed to initialize_phi_fields
+    # is honoured for every init mode except the one production uses:
+    # unified_phi._init_field returns early for mode="full", writing a constant
+    # field and ignoring the seed entirely. So this loop asked for N different
+    # starting points and got N bit-identical ones -- measured on a real
+    # geometry run, all three candidates in round 0 reported
+    # T_raw=2.9540955930827377 and mass=0.15104738499999998 at iteration 1, and
+    # were still identical at iteration 3.
+    #
+    # That is not a wasted variable, it is wasted CFD: with --candidates 3
+    # --rounds 2 the first round solves the same car three times, which at the
+    # measured ~48 min per real iteration is about 4.8 hours of duplicate
+    # solves. It stayed invisible because the orchestrator tests use mocked
+    # bindings returning canned outcomes, where identical inputs are
+    # indistinguishable from diverse ones.
+    #
+    # Perturbing here uses the same machinery and amplitude the BETWEEN-round
+    # refill already uses, so population diversity works the same way at round 0
+    # as it does afterwards. Candidate 0 stays the clean envelope (or the warm
+    # start), so nothing is lost relative to a single-candidate run.
     population: list[dict] = []
     for i in range(n_candidates):
         if i == 0 and warm_start_grids is not None:
@@ -154,6 +175,10 @@ def optimize_single_w(
             grids = bindings.initialize_phi_fields(
                 W_mm, x_front_mm, d_halo_mm, seed=config.random_seed + i
             )
+            if i > 0:
+                grids = bindings.perturb_phi_fields(
+                    grids, seed=config.random_seed + i, amplitude=0.10,
+                )
         population.append(grids)
 
     round_config = OptimizerConfig(

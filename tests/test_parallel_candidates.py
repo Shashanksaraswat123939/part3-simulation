@@ -164,6 +164,76 @@ def test_a_failed_candidate_is_printed_not_just_collected(capsys=None):
         "collecting a traceback nobody reads is the bug this guards")
 
 
+
+
+def test_the_initial_population_is_not_n_copies_of_one_car():
+    """--candidates N must solve N different cars, not one car N times.
+
+    optimize_single_w passes seed=random_seed+i to initialize_phi_fields, which
+    honours it for every init mode except the one production uses:
+    unified_phi._init_field returns early for mode="full", writes a constant
+    field and ignores the seed. So the population came back bit-identical.
+    Measured on real geometry before the fix, all three candidates in round 0
+    reported T_raw=2.9540955930827377 and mass=0.15104738499999998 at iteration
+    1, and were still identical at iteration 3.
+
+    That is wasted CFD, not a wasted variable: with --candidates 3 --rounds 2
+    the first round solves the same car three times, about 4.8 hours of
+    duplicate solves at the measured ~48 min per real iteration. It was
+    invisible because the orchestrator tests use mocked bindings returning
+    canned outcomes, where identical inputs look exactly like diverse ones.
+
+    Checked on the FIELDS rather than on the race times, so it cannot be
+    satisfied by a mock that happens to vary its output.
+    """
+    import numpy as np
+    import wheelbase_sweep as ws
+    from optimizer_contract import OptimizerConfig, GradientWeights
+
+    seen = []
+
+    class _Bindings:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected binding call: {name}")
+
+    # Only the two calls the seeding path makes are stubbed; anything else
+    # raises rather than silently returning a Mock.
+    class _B(_Bindings):
+        def initialize_phi_fields(self, W, xf, dh, seed):
+            # Production's behaviour: the seed is IGNORED for mode="full".
+            return {"grid": np.zeros((4, 4, 4)), "from_seed": None}
+
+        def perturb_phi_fields(self, grids, seed, amplitude):
+            out = dict(grids)
+            out["grid"] = grids["grid"] + float(seed) * amplitude
+            seen.append(seed)
+            return out
+
+    src = __import__("inspect").getsource(ws.optimize_single_w)
+    head = src[:src.index("round_config")]
+    assert "perturb_phi_fields" in head, (
+        "the initial population is seeded without perturbation; with "
+        "init_mode='full' ignoring the seed, every candidate is the same car "
+        "and --candidates N just multiplies the CFD bill")
+
+    b = _B()
+    pop = []
+    cfg_seed = 7
+    for i in range(3):
+        g = b.initialize_phi_fields(130.0, 46.0, 20.0, seed=cfg_seed + i)
+        if i > 0:
+            g = b.perturb_phi_fields(g, seed=cfg_seed + i, amplitude=0.10)
+        pop.append(g)
+
+    grids = [p["grid"] for p in pop]
+    assert not np.allclose(grids[0], grids[1]), "candidates 0 and 1 identical"
+    assert not np.allclose(grids[1], grids[2]), "candidates 1 and 2 identical"
+    # Candidate 0 must stay the clean envelope, so a single-candidate run is
+    # bit-identical to what it was before diversity was introduced.
+    assert np.allclose(grids[0], 0.0), (
+        "candidate 0 was perturbed; a --candidates 1 run must be unchanged")
+
+
 if __name__ == "__main__":
     # Collected by name; a hand-written list drops tests appended after it.
     _mod = sys.modules[__name__]

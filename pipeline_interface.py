@@ -717,6 +717,34 @@ def unified_bindings(
         # marching-cubes fidelity.
         half_mesh_cfd = _decimate_for_cfd(extract_half_surface(geom), stl_triangle_budget)
         half_mesh_cfd.export(stl_half, file_type="stl_ascii")
+        # Report the quality of the mesh OpenFOAM actually receives.
+        #
+        # The triangle-quality gate in surface_extraction runs on the FULL
+        # marching-cubes mesh. This decimated half is what goes to
+        # snappyHexMesh, nothing measured it, and it is far worse -- measured on
+        # real split6 output:
+        #     dhalo16 iter1       120,000 tris  min angle 0.10 deg  6.44% < 10 deg
+        #     dhalo43.72 iter6    240,000 tris  min angle 0.04 deg  0.90% < 10 deg
+        # Both meshed and solved cleanly (converged=True, Mesh OK, 0 illegal
+        # faces), as has every candidate for the life of the project.
+        #
+        # So the 10 deg gate is roughly two orders of magnitude stricter than
+        # anything this pipeline has ever needed, AND it is checking a different
+        # artefact than the one that matters. That is worth knowing rather than
+        # acting on blind: the number is logged here per iteration so the
+        # threshold can be set from evidence instead of assumption. Note the
+        # second row also shows decimation backing off -- 240,000 triangles
+        # against a 120,000 budget -- which _decimate_for_cfd does deliberately
+        # when reduction would break watertightness.
+        try:
+            _a = np.degrees(half_mesh_cfd.face_angles)
+            _a = _a[np.isfinite(_a) & (_a > 0)]
+            print(f"[cfd-stl] {candidate_id}: {len(half_mesh_cfd.faces):,} tris "
+                  f"(budget {stl_triangle_budget:,})  min angle {_a.min():.2f} deg  "
+                  f"{100.0 * (_a < 10.0).mean():.2f}% below 10 deg  "
+                  f"watertight={half_mesh_cfd.is_watertight}", flush=True)
+        except Exception:  # noqa: BLE001 -- a report must never fail the gate
+            pass
         snap = geom.phi.save(candidate_id, run_out_dir)
         # The record contract wants the four component keys; the unified field
         # is one file, so all four point at it (single-field snapshot).

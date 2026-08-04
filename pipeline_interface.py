@@ -544,6 +544,7 @@ def unified_bindings(
     adjoint_kwargs: Optional[dict] = None,
     stl_triangle_budget: int = STL_TRIANGLE_BUDGET,
     cargo_placement: Optional[dict] = None,
+    seed_geometry=None,
 ) -> PipelineBindings:
     """Bind Part 3 to the UNIFIED single-field geometry + the real objective.
 
@@ -646,6 +647,30 @@ def unified_bindings(
     # every Stage-2 car silently reverted to the geometric default
     # (corridor-centre, wide-forward) and the flip DOF was dead.
     def initialize_phi_fields(W_mm, x_front_mm, d_halo_mm, seed):
+        # SEEDED from Stage 1's carved field when one is supplied.
+        #
+        # Stage 1 carves every candidate 30 steps toward the T3.6 floor to rank
+        # it, with no CFD at all, and that shape used to be discarded -- so
+        # Stage 2 rebuilt from the 150 g envelope and re-descended the same
+        # curve at roughly 55 minutes per iteration. It was affordable only
+        # because redistancing was eroding the body and doing most of the
+        # carving for free; with reinitialise_sdf fixed, the descent measures
+        # ~150 iterations at production spacing, about six days per d_halo.
+        #
+        # Seeding also makes the cross-d_halo comparison FAIR, which the
+        # warm-start chain does not: every d_halo now begins from the same
+        # Stage-1 carve rather than from wherever the previous one finished. The
+        # 2026-08-01 sweep ranked perfectly in sweep order with starting masses
+        # of 149.4, 135.9, 126.3, 119.3 and 113.2 g, which measured carve depth
+        # rather than halo position.
+        if seed_geometry is not None:
+            import copy as _copy
+            geom = _copy.deepcopy(seed_geometry)
+            geom = remap_geometry(geom, W_mm=W_mm, x_front_mm=x_front_mm,
+                                  d_halo_mm=d_halo_mm,
+                                  cargo_placement=cargo_placement)
+            enforce_symmetry(geom)
+            return geom
         geom = build_unified_geometry(W_mm, x_front_mm, d_halo_mm,
                                       init_mode="full", seed=seed,
                                       cargo_placement=cargo_placement)
@@ -675,8 +700,16 @@ def unified_bindings(
         # Falls back to a rebuild rather than failing the candidate: a remap can
         # legitimately refuse (the cargo has to fit the new pocket), and losing
         # the warm start is much cheaper than losing the d_halo.
+        # When a Stage-1 seed exists, warm-start from THAT rather than from the
+        # previous d_halo. Chaining is what made the 2026-08-01 sweep's ranking
+        # meaningless: each group inherited its predecessor's carve, so the
+        # winner had simply been carving longest. Seeding from a common ancestor
+        # keeps the cost saving and restores a fair comparison.
+        _src = seed_geometry if seed_geometry is not None else prev_geom
         try:
-            geom = remap_geometry(prev_geom, W_mm=W_mm, x_front_mm=x_front_mm,
+            import copy as _copy
+            geom = remap_geometry(_copy.deepcopy(_src),
+                                  W_mm=W_mm, x_front_mm=x_front_mm,
                                   d_halo_mm=d_halo_mm,
                                   cargo_placement=cargo_placement)
         except Exception as exc:  # noqa: BLE001

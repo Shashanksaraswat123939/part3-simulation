@@ -159,17 +159,59 @@ def zero_penalties(gate_outcome: object) -> PenaltyInputs:
 # equilibrium rather than a defect.
 T36_MIN_COMPETITION_MASS_KG: float = 0.048
 T36_BARRIER_WEIGHT: float = 100.0
+# The DESCENT aims above the floor; the ranking penalty still measures against
+# the floor itself. See t36_descent_gradient for why the target has to be
+# strictly higher: the growth velocity decays to zero as the deficit closes, so
+# aiming at the floor converges TO it from below and every candidate stays
+# fractionally illegal. 0.5 g also covers machining tolerance.
+T36_TARGET_MARGIN_KG: float = 0.0005
 # Cartridge mass, excluded from T3.6. Imported lazily to avoid a Part-2 import
 # at module load in environments that only exercise Part 3's fakes.
 _T36_CARTRIDGE_KG: float = 0.023
 
 
+def t36_descent_gradient(total_mass_kg: float) -> "float | None":
+    """dT/dmass to USE while T3.6 is active, or None when it is not.
+
+    This REPLACES the physics mass gradient rather than adding to it, and that
+    distinction is the entire fix. A soft penalty gradient ADDED to dT/dmass
+    can cancel against the physics term, and the descent parks exactly where it
+    does -- which is always strictly INSIDE the illegal region, because at the
+    floor the barrier contributes nothing while physics still says "lighter is
+    faster". Solving physics + barrier = 0 for the barrier as first written
+    (weight 100, floor 48 g) gives the resting mass:
+
+        dT/dmass    5 s/kg  ->  settles 0.058 g under the floor
+        dT/dmass   17 s/kg  ->  settles 0.196 g under
+        dT/dmass   40 s/kg  ->  settles 0.461 g under
+        dT/dmass  100 s/kg  ->  settles 1.152 g under
+
+    No choice of weight fixes that. Raising it only shrinks the offset while
+    stiffening the shape velocity, and the offset scales with a gradient whose
+    magnitude is not known in advance. Replacing the gradient removes the
+    cancellation outright: while the car is underweight the only mass signal is
+    "add mass", so it grows monotonically until legal and normal physics
+    resumes above the target.
+
+    The RANKING penalty stays additive and stays measured against the true
+    floor -- see t36_mass_barrier. Penalty decides which candidate wins;
+    this decides which way the shape moves. They are different jobs.
+    """
+    comp = total_mass_kg - _T36_CARTRIDGE_KG
+    target = T36_MIN_COMPETITION_MASS_KG + T36_TARGET_MARGIN_KG
+    if comp >= target:
+        return None
+    return -(2.0 * T36_BARRIER_WEIGHT * (target - comp)
+             / T36_MIN_COMPETITION_MASS_KG ** 2)
+
+
 def t36_mass_barrier(total_mass_kg: float) -> tuple[float, float]:
     """(penalty_seconds, d_penalty/d_mass) for the T3.6 minimum-mass floor.
 
-    Zero at or above the floor; steep and one-sided below it. The gradient is
-    NEGATIVE below the floor, so adding it to dT/dmass flips the descent
-    direction and the level set grows material back.
+    Zero at or above the floor; steep and one-sided below it. The penalty is
+    what makes an underweight candidate rank badly. The gradient it returns is
+    reported, not used for the descent -- t36_descent_gradient does that, for
+    the cancellation reason documented there.
     """
     comp = total_mass_kg - _T36_CARTRIDGE_KG
     if comp >= T36_MIN_COMPETITION_MASS_KG:
@@ -417,14 +459,19 @@ def _run_single_iteration(
     # T3.6: penalise an underweight car AND push the shape back out. Without the
     # gradient half, an underweight candidate merely scores badly while the
     # descent keeps removing material.
-    _t36_pen, _t36_grad = t36_mass_barrier(mass_report.total_mass_kg)
+    _t36_pen, _ = t36_mass_barrier(mass_report.total_mass_kg)
     if _t36_pen > 0.0:
         T_penalized += _t36_pen
         _comp_g = (mass_report.total_mass_kg - _T36_CARTRIDGE_KG) * 1000.0
         if iteration == 1 or iteration % 5 == 0:
+            # Print the gradient the DESCENT actually uses, not the barrier's
+            # own -- they differ (the descent aims at floor + margin), and a log
+            # that reports a number the code does not act on is how most of the
+            # bugs in this pipeline stayed hidden.
+            _shown = t36_descent_gradient(mass_report.total_mass_kg) or 0.0
             print(f"[T3.6] {iter_id}: competition mass {_comp_g:.2f} g is under "
                   f"the {T36_MIN_COMPETITION_MASS_KG*1000:.0f} g floor; "
-                  f"penalty {_t36_pen:.3f} s, dT/dmass {_t36_grad:+.1f} s/kg "
+                  f"penalty {_t36_pen:.3f} s, dT/dmass {_shown:+.1f} s/kg "
                   f"(pushing material back out)", flush=True)
     # ⚠ THIS CANNOT TRIGGER CONVERGENCE, and it is recorded rather than trusted.
     #
@@ -517,9 +564,11 @@ def _run_single_iteration(
         # recorded in the candidate record stay pure physics, so the reported
         # dT/dmass is still the race objective's own number.
         _update_grads = dict(objective.gradients)
-        if _t36_grad != 0.0:
-            _update_grads["dT_dmass"] = (
-                _update_grads.get("dT_dmass", 0.0) + _t36_grad)
+        _t36_descent = t36_descent_gradient(mass_report.total_mass_kg)
+        if _t36_descent is not None:
+            # REPLACES, does not add -- an added barrier cancels against the
+            # physics term and parks the car inside the illegal region.
+            _update_grads["dT_dmass"] = _t36_descent
         bindings.update_phi(
             phi_grids, adjoint.sensitivity, adjoint.half_mesh, config.hj_dt,
             gradient_weights, _update_grads, mass_report,

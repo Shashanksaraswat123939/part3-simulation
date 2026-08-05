@@ -403,8 +403,77 @@ def test_the_t36_gradient_reaches_the_shape_update():
     assert "_update_grads" in call, (
         "update_phi is called with the raw objective gradients, so the T3.6 "
         "barrier affects the reported time but not the descent direction")
-    assert "_t36_grad" in src and "dT_dmass" in src, (
-        "the barrier gradient is never folded into dT_dmass")
+    assert "_t36_descent" in src and "dT_dmass" in src, (
+        "the T3.6 descent gradient never reaches dT_dmass")
+
+
+def test_the_t36_descent_replaces_rather_than_adds():
+    """An ADDED barrier gradient parks the car inside the illegal region.
+
+    This is the failure the first version of the fix had. A soft penalty
+    gradient added to dT/dmass can cancel against the physics term, and the
+    descent rests exactly where it does -- which is always strictly BELOW the
+    floor, because at the floor the barrier contributes nothing while physics
+    still says lighter is faster. Solving physics + barrier = 0 (weight 100,
+    floor 48 g) put the resting mass 0.058 g under at dT/dmass 5 s/kg and
+    1.152 g under at 100 s/kg. No weight fixes it; the offset just scales with
+    a gradient whose magnitude is not known ahead of time.
+
+    So while the constraint is active the descent gradient must REPLACE the
+    physics one, leaving nothing to cancel against.
+    """
+    import inspect
+    import inner_loop as il
+
+    src = inspect.getsource(il._run_single_iteration)
+    seg = src[src.index("_t36_descent"):src.index("bindings.update_phi(")]
+    assert "+" not in seg.split("_update_grads[\"dT_dmass\"]")[-1], (
+        "the T3.6 descent gradient is being ADDED to dT_dmass; it must replace "
+        "it, or it cancels against physics and the car rests underweight")
+
+    # Numerically: run the descent to rest from below and from far below, for
+    # physics gradients spanning a decade, and require every resting mass legal.
+    step = 1e-6
+    for g in (5.0, 17.042, 40.0, 100.0):
+        for start in (0.0469, 0.0440):
+            comp = start
+            for _ in range(20000):
+                d = il.t36_descent_gradient(comp + il._T36_CARTRIDGE_KG)
+                comp -= step * (g if d is None else d)
+            assert comp >= il.T36_MIN_COMPETITION_MASS_KG, (
+                f"descent with dT/dmass={g} from {start*1000:.1f} g rests at "
+                f"{comp*1000:.3f} g competition, under the "
+                f"{il.T36_MIN_COMPETITION_MASS_KG*1000:.0f} g floor")
+
+
+def test_the_t36_target_margin_is_load_bearing():
+    """Aiming AT the floor lands fractionally under it.
+
+    The growth velocity decays to zero as the deficit closes, so the descent
+    approaches its target from below and never quite arrives. Measured: with
+    zero margin it rests at 48.000000 g to six decimals and still compares
+    below the floor. The margin is what makes the result actually legal, not
+    decoration -- if someone trims it to zero this fails.
+    """
+    import inner_loop as il
+
+    original = il.T36_TARGET_MARGIN_KG
+    try:
+        def rest(margin):
+            il.T36_TARGET_MARGIN_KG = margin
+            comp = 0.0440
+            for _ in range(20000):
+                d = il.t36_descent_gradient(comp + il._T36_CARTRIDGE_KG)
+                comp -= 1e-6 * (17.042 if d is None else d)
+            return comp
+
+        assert rest(0.0) < il.T36_MIN_COMPETITION_MASS_KG, (
+            "with no margin the descent somehow reached the floor exactly; if "
+            "that is genuinely true the margin can go, but verify it first")
+        assert rest(original) >= il.T36_MIN_COMPETITION_MASS_KG, (
+            f"the shipped margin {original*1000:.1f} g does not clear the floor")
+    finally:
+        il.T36_TARGET_MARGIN_KG = original
 
 
 if __name__ == "__main__":

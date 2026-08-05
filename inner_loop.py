@@ -134,6 +134,54 @@ def zero_penalties(gate_outcome: object) -> PenaltyInputs:
     return PenaltyInputs(manufacturing_penalty_s=0.0, rule_margin_penalty_s=0.0)
 
 
+
+# T3.6 minimum mass, enforced in STAGE 2.
+#
+# The barrier lived only in Stage 1's proxy (bayesian_outer_search). Stage 2's
+# objective is the real race time, which has no mass floor at all -- lighter is
+# always faster, so nothing stopped it carving straight through the regulation
+# minimum.
+#
+# That was harmless while Stage 2 started from the 150 g envelope and never got
+# near the floor in its iteration budget. It stopped being harmless the moment
+# Stage 1 began handing over a car ALREADY at the floor: the 2026-08-05 run
+# seeded at 27.93 g of machined body, which is 46.93 g of competition mass
+# against a 48 g minimum, and every further iteration would have made it more
+# illegal.
+#
+# Measured on the COMPETITION mass -- T3.6 excludes the CO2 cartridge -- and
+# applied two ways, because a penalty that only affects the score lets the
+# optimiser keep walking downhill:
+#   * as rule_margin_penalty_s, so an underweight car ranks badly; and
+#   * as an addition to dT/dmass, so the SHAPE UPDATE pushes material back out.
+# The second is what actually holds the line. Stage 1's barrier works the same
+# way and settles ~1.75 g under the floor, which is the discrete level-set
+# equilibrium rather than a defect.
+T36_MIN_COMPETITION_MASS_KG: float = 0.048
+T36_BARRIER_WEIGHT: float = 100.0
+# Cartridge mass, excluded from T3.6. Imported lazily to avoid a Part-2 import
+# at module load in environments that only exercise Part 3's fakes.
+_T36_CARTRIDGE_KG: float = 0.023
+
+
+def t36_mass_barrier(total_mass_kg: float) -> tuple[float, float]:
+    """(penalty_seconds, d_penalty/d_mass) for the T3.6 minimum-mass floor.
+
+    Zero at or above the floor; steep and one-sided below it. The gradient is
+    NEGATIVE below the floor, so adding it to dT/dmass flips the descent
+    direction and the level set grows material back.
+    """
+    comp = total_mass_kg - _T36_CARTRIDGE_KG
+    if comp >= T36_MIN_COMPETITION_MASS_KG:
+        return 0.0, 0.0
+    deficit = (T36_MIN_COMPETITION_MASS_KG - comp) / T36_MIN_COMPETITION_MASS_KG
+    penalty = T36_BARRIER_WEIGHT * deficit * deficit
+    d_penalty = -(2.0 * T36_BARRIER_WEIGHT
+                  * (T36_MIN_COMPETITION_MASS_KG - comp)
+                  / T36_MIN_COMPETITION_MASS_KG ** 2)
+    return penalty, d_penalty
+
+
 def _iter_candidate_id(candidate_id: str, iteration: int) -> str:
     return f"{candidate_id}_iter{iteration:04d}"
 
@@ -365,6 +413,19 @@ def _run_single_iteration(
 
     penalties = penalty_provider(gate)
     T_penalized = compose_penalized_time(objective.T_com_penalized, penalties)
+
+    # T3.6: penalise an underweight car AND push the shape back out. Without the
+    # gradient half, an underweight candidate merely scores badly while the
+    # descent keeps removing material.
+    _t36_pen, _t36_grad = t36_mass_barrier(mass_report.total_mass_kg)
+    if _t36_pen > 0.0:
+        T_penalized += _t36_pen
+        _comp_g = (mass_report.total_mass_kg - _T36_CARTRIDGE_KG) * 1000.0
+        if iteration == 1 or iteration % 5 == 0:
+            print(f"[T3.6] {iter_id}: competition mass {_comp_g:.2f} g is under "
+                  f"the {T36_MIN_COMPETITION_MASS_KG*1000:.0f} g floor; "
+                  f"penalty {_t36_pen:.3f} s, dT/dmass {_t36_grad:+.1f} s/kg "
+                  f"(pushing material back out)", flush=True)
     # ⚠ THIS CANNOT TRIGGER CONVERGENCE, and it is recorded rather than trusted.
     #
     # The tracker stops when gradient_norm < DEFAULT_GRADIENT_NORM_THRESHOLD
@@ -452,9 +513,16 @@ def _run_single_iteration(
         # gives: sensitivity[i] belongs to half_mesh.vertices[i] and the array
         # alone carries no indexing.
         sens_path = _try_save_sensitivity(adjoint, iter_id, out_dir)
+        # The gradients the SHAPE UPDATE sees carry the T3.6 barrier; the ones
+        # recorded in the candidate record stay pure physics, so the reported
+        # dT/dmass is still the race objective's own number.
+        _update_grads = dict(objective.gradients)
+        if _t36_grad != 0.0:
+            _update_grads["dT_dmass"] = (
+                _update_grads.get("dT_dmass", 0.0) + _t36_grad)
         bindings.update_phi(
             phi_grids, adjoint.sensitivity, adjoint.half_mesh, config.hj_dt,
-            gradient_weights, objective.gradients, mass_report,
+            gradient_weights, _update_grads, mass_report,
         )
     except Exception as exc:  # noqa: BLE001
         # Adjoint/update failure after a successful objective: the T values

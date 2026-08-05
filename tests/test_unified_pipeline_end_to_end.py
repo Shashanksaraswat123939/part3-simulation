@@ -347,6 +347,66 @@ def test_a_whole_run_reaches_final_deliverables():
         json.dumps(deliverables, default=str)
 
 
+
+
+def test_stage2_enforces_the_t36_mass_floor():
+    """Stage 2 had NO mass floor, and now starts at it.
+
+    The T3.6 barrier lived only in Stage 1's proxy. Stage 2's objective is the
+    real race time, where lighter is always faster, so nothing stopped it
+    carving through the regulation minimum. That was harmless while Stage 2
+    began from the 150 g envelope and never approached the floor -- and stopped
+    being harmless the moment Stage 1 started handing over a car already there:
+    the 2026-08-05 run seeded at 27.93 g machined, i.e. 46.93 g of competition
+    mass against a 48 g floor, with every further iteration making it worse.
+
+    Both halves matter. The penalty makes an underweight car rank badly; the
+    GRADIENT is what stops the descent, because a penalty alone lets the
+    optimiser keep walking downhill and merely score poorly for it.
+    """
+    from inner_loop import (t36_mass_barrier, T36_MIN_COMPETITION_MASS_KG,
+                            _T36_CARTRIDGE_KG)
+
+    at_floor = T36_MIN_COMPETITION_MASS_KG + _T36_CARTRIDGE_KG
+    pen, grad = t36_mass_barrier(at_floor + 0.005)
+    assert pen == 0.0 and grad == 0.0, "penalises a legal car"
+    pen, grad = t36_mass_barrier(at_floor)
+    assert pen == 0.0 and grad == 0.0, "penalises a car exactly at the floor"
+
+    # Below the floor: penalty positive, gradient negative (pushes mass UP).
+    pen, grad = t36_mass_barrier(at_floor - 0.004)
+    assert pen > 0.0, "underweight car carries no penalty"
+    assert grad < 0.0, (
+        "the barrier gradient is not negative below the floor, so adding it to "
+        "dT/dmass would not reverse the descent and the car keeps shrinking")
+
+    # Steeper the further under, or it cannot arrest a fast descent.
+    p_near, g_near = t36_mass_barrier(at_floor - 0.001)
+    p_far, g_far = t36_mass_barrier(at_floor - 0.008)
+    assert p_far > p_near and g_far < g_near, "barrier does not steepen"
+
+    # And it must be measured on COMPETITION mass -- T3.6 excludes the
+    # cartridge. A car whose TOTAL is 48 g is 23 g under the real floor.
+    pen_total_48, _ = t36_mass_barrier(0.048)
+    assert pen_total_48 > 0.0, (
+        "a car with 48 g TOTAL scores no penalty, so the floor is being "
+        "measured on total mass instead of competition mass -- that is 23 g "
+        "of slack and it is exactly the bug fixed in Stage 1 on 2026-08-04")
+
+
+def test_the_t36_gradient_reaches_the_shape_update():
+    """The barrier must reach update_phi, not just the score."""
+    import inspect
+    import inner_loop as il
+    src = inspect.getsource(il._run_single_iteration)
+    call = src[src.index("bindings.update_phi("):]
+    assert "_update_grads" in call, (
+        "update_phi is called with the raw objective gradients, so the T3.6 "
+        "barrier affects the reported time but not the descent direction")
+    assert "_t36_grad" in src and "dT_dmass" in src, (
+        "the barrier gradient is never folded into dT_dmass")
+
+
 if __name__ == "__main__":
     # Collected by name; a hand-written call list silently drops every test
     # appended after it, which has already hidden several tests in this repo.

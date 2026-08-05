@@ -152,11 +152,19 @@ def zero_penalties(gate_outcome: object) -> PenaltyInputs:
 # Measured on the COMPETITION mass -- T3.6 excludes the CO2 cartridge -- and
 # applied two ways, because a penalty that only affects the score lets the
 # optimiser keep walking downhill:
-#   * as rule_margin_penalty_s, so an underweight car ranks badly; and
-#   * as an addition to dT/dmass, so the SHAPE UPDATE pushes material back out.
-# The second is what actually holds the line. Stage 1's barrier works the same
-# way and settles ~1.75 g under the floor, which is the discrete level-set
-# equilibrium rather than a defect.
+#   * as a penalty on T_penalized, so an underweight car ranks badly; and
+#   * via t36_descent_gradient, which REPLACES dT/dmass so the shape update
+#     pushes material back out.
+# The second is what holds the line. It has to replace rather than add: an
+# added barrier cancels against the physics term and the descent rests exactly
+# where they cancel, which is always inside the illegal region.
+#
+# An earlier version of this comment said Stage 1's barrier "settles ~1.75 g
+# under the floor, which is the discrete level-set equilibrium rather than a
+# defect". Both halves were wrong. It settled under the floor because it
+# SUBTRACTED the barrier from dT/dmass -- the same defect, since fixed there
+# too -- and a car that comes to rest below the T3.6 minimum is illegal, which
+# is a defect however it arises.
 T36_MIN_COMPETITION_MASS_KG: float = 0.048
 T36_BARRIER_WEIGHT: float = 100.0
 # The DESCENT aims above the floor; the ranking penalty still measures against
@@ -190,8 +198,20 @@ def t36_descent_gradient(total_mass_kg: float) -> "float | None":
     stiffening the shape velocity, and the offset scales with a gradient whose
     magnitude is not known in advance. Replacing the gradient removes the
     cancellation outright: while the car is underweight the only mass signal is
-    "add mass", so it grows monotonically until legal and normal physics
-    resumes above the target.
+    "add mass", so the descent is always pushed back toward legality.
+
+    CAVEAT on how far that goes. The numbers above, and the resting masses in
+    the tests, come from a scalar model where the mass step is proportional to
+    the gradient. The real Hamilton-Jacobi step is CFL-limited -- it moves the
+    surface by CFL x spacing whatever the gradient magnitude -- so the descent
+    OSCILLATES about the target with an amplitude set by grid spacing rather
+    than resting on it. Measured on Stage 1's proxy at 2 mm, where one step
+    moves 1-2 g, replacing rather than subtracting took the overshoot from
+    2.5-4.1 g under the floor to 0.85-2.3 g under: a clear improvement, and
+    still illegal at that spacing. Stage 2 runs at 0.5 mm where a step moves
+    ~4x less mass, so the residual should be a few tenths of a gram -- but that
+    has NOT been measured end to end, and until it has, the built car's mass
+    must be checked against T3.6 rather than assumed legal.
 
     The RANKING penalty stays additive and stays measured against the true
     floor -- see t36_mass_barrier. Penalty decides which candidate wins;

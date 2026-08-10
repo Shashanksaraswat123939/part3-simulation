@@ -76,6 +76,16 @@ class CFDOutcome:
     # its own race time, and merge_results ranks on a number whose error bar was
     # deliberately computed and then dropped.
     force_oscillation: Optional[float] = None
+    # Standard error of the MEAN streamwise force, and how much that mean is
+    # still drifting, both as fractions of it. These are the numbers that say
+    # whether a drag DELTA is measurable -- force_oscillation is peak-to-peak,
+    # which one outlier sets and which does not shrink with a longer window.
+    # Carried here for the same reason force_oscillation had to be: Part 2
+    # computes them and warns, but the caller holding the ranking decision
+    # never saw them, so they died at this boundary and survived only as a
+    # warning in a worker thread.
+    force_mean_stderr: Optional[float] = None
+    force_drift: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -338,6 +348,8 @@ def real_bindings(
             converged=health.converged,
             residual_final=health.residual_final,
             force_oscillation=health.force_oscillation,
+            force_mean_stderr=getattr(health, "force_mean_stderr", None),
+            force_drift=getattr(health, "force_drift", None),
         )
 
     def evaluate_objective(D20, L, m_total, h_com, x_com, mu, wheel_moi):
@@ -888,7 +900,9 @@ def unified_bindings(
         return CFDOutcome(D20=full.D20, L=full.L, Cm=full.Cm, A=full.A,
                           converged=health.converged,
                           residual_final=health.residual_final,
-                          force_oscillation=health.force_oscillation)
+                          force_oscillation=health.force_oscillation,
+                          force_mean_stderr=getattr(health, "force_mean_stderr", None),
+                          force_drift=getattr(health, "force_drift", None))
 
     def evaluate_objective(D20, L, m_total, h_com, x_com, mu, wheel_moi):
         p = _params(D20, L, m_total, h_com, x_com, mu, wheel_moi)

@@ -694,6 +694,13 @@ def _run_single_iteration(
                # serialised, but never passed -- every record carried "".
                "stl_path": gate.stl_path or "",
                "inaccessible_area_mm2": gate.inaccessible_area_mm2,
+               # The penalty is folded into T_penalized, so without this
+               # field no record can say how much of its own race time was
+               # manufacturing cost -- the same "computed, then dropped"
+               # pattern that lost inaccessible_area_mm2 and
+               # force_oscillation before it.
+               "manufacturing_penalty_s": penalties.manufacturing_penalty_s,
+               "rule_margin_penalty_s": penalties.rule_margin_penalty_s,
                "adjoint_sensitivity_field_path": sens_path,
                "cfd_force_report": cfd,
                "mass_report": mass_report,

@@ -36,6 +36,17 @@ import numpy as np
 import coarse
 coarse.use_spacing(2.0)          # keep the geometry builds cheap
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _coarse_spacing():
+    """conftest restores the pristine spacing after each test; put this file's
+    2.0 mm back. Setting it at import only is why the full-suite run and
+    running this file alone disagreed."""
+    coarse.use_spacing(2.0)
+
+
 _CSV = str(_ROOT / "part2-simulation" / "co2_thrust_data.csv")
 # Same fixed-hardware fixture as test_unified_pipeline_end_to_end.
 _FHW = dict(

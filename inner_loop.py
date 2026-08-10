@@ -90,35 +90,73 @@ class InnerLoopResult:
     final_phi_grids: Optional[dict] = None
 
 
-# Penalty provider: maps a GateOutcome to Part 3 penalties. Default is the
-# honest zero-with-provenance provider; a real provider reads curvature /
-# accessibility penalty data from Part 1 once Part 1 emits it.
-PenaltyProvider = Callable[[object], PenaltyInputs]
+# Penalty provider: (GateOutcome, dT/dmass) -> Part 3 penalties. dT/dmass comes
+# from the objective for THIS candidate, so a provider can price geometry in
+# seconds without inventing a coefficient. Default is machinability_penalty.
+PenaltyProvider = Callable[[object, float], PenaltyInputs]
 
 
 _ZERO_PENALTY_WARNED = set()
 
 
-def zero_penalties(gate_outcome: object) -> PenaltyInputs:
-    """Explicit zero penalties. Used when Part 1 has not yet emitted
-    manufacturing-penalty magnitudes for repaired-but-penalized geometry.
-    Deliberately a named function so the choice shows up in code review —
-    do NOT let this silently become the permanent behavior; the spec's
-    'Accessibility failure (large) → assign manufacturing penalty, continue'
-    path needs a real magnitude eventually.
+def machinability_penalty(gate_outcome: object,
+                          dT_dmass_s_per_kg: float) -> PenaltyInputs:
+    """Charge unreachable surface at the objective's own mass sensitivity.
 
-    It became the permanent behaviour. No caller has ever passed a different
-    provider, so compose_penalized_time has only ever added 0.0 and every
-    candidate in the 2026-07-29 sweep was logged "geometry_repaired" -- meaning
-    the accessibility check DID find unreachable surface -- while paying nothing
-    for it. That is free rein to evolve an unmanufacturable shape, and it costs
-    more now that the optimiser actually carves.
+    Material behind a face the cutter cannot reach does not get removed, so the
+    manufactured car is heavier than the simulated one. That is a race-time
+    cost the objective already knows how to price: dT/dmass, which Part 2
+    returns for every candidate. No new coefficient is introduced.
 
-    Still returns zero, because the right magnitude is a calibration decision
-    and inventing a coefficient here would be worse than the gap: a made-up
-    penalty silently reranks candidates and looks principled. But it warns once
-    per candidate with the measured area attached, so the gap is visible in the
-    log rather than inferred from source.
+    The depth is MIN_RADIUS_M, the minimum machining radius. A cutter cannot
+    approach an unreachable surface closer than its own radius, so one
+    tool-radius layer under each blocked face is a floor on the material left
+    behind -- and, being a property of the tool rather than of the mesh, it
+    keeps the penalty independent of grid spacing. A penalty that moved with
+    resolution would make Stage 1 and Stage 2 rank the same car differently.
+
+        penalty_s = dT/dmass * (blocked_area * MIN_RADIUS_M * rho_body)
+
+    On the 2026-08-10 car: 165.8 mm^2 blocked -> 0.085 g trapped -> ~1.5 ms
+    against a ~1.2 s race. Small, because the car is nearly machinable; it
+    grows with the defect rather than being a fixed fine.
+
+    This replaces zero_penalties as the default. Read that function's docstring
+    for what the gap cost: every candidate in the 2026-07-29 sweep was logged
+    "geometry_repaired" while paying nothing for it.
+    """
+    area_mm2 = getattr(gate_outcome, "inaccessible_area_mm2", None) or 0.0
+    if area_mm2 <= 0.0:
+        return PenaltyInputs(manufacturing_penalty_s=0.0, rule_margin_penalty_s=0.0)
+    from geometry_contract import DENSITY_BODY_KGM3, MIN_RADIUS_M
+    trapped_kg = (area_mm2 * 1e-6) * MIN_RADIUS_M * DENSITY_BODY_KGM3
+    # A negative dT/dmass means the objective currently wants MORE mass (the
+    # T3.6 floor is pushing back out). Rewarding unmachinable geometry for that
+    # would be perverse, so the penalty floors at zero rather than flipping.
+    seconds = max(0.0, float(dT_dmass_s_per_kg)) * trapped_kg
+    return PenaltyInputs(manufacturing_penalty_s=seconds,
+                         rule_margin_penalty_s=0.0)
+
+
+def zero_penalties(gate_outcome: object,
+                   dT_dmass_s_per_kg: float = 0.0) -> PenaltyInputs:
+    """Explicit zero penalties. NO LONGER THE DEFAULT -- see
+    machinability_penalty, which prices blocked area through dT/dmass.
+
+    Kept so a caller can deliberately switch the manufacturing term off (an
+    aero-only study, a test isolating the objective), and because the warning
+    below is still the right behaviour when someone does: it names the measured
+    area being ignored rather than letting a silent 0.0 look like a clean car.
+
+    History, because it is the reason the default changed: this was the default
+    for the whole project. Every candidate in the 2026-07-29 sweep was logged
+    "geometry_repaired" -- the accessibility check DID find unreachable surface
+    -- while paying nothing for it, which is free rein to evolve an
+    unmanufacturable shape. The stated reason for returning zero was that the
+    magnitude was a calibration decision and a made-up coefficient would be
+    worse than the gap. That reasoning was sound; what unblocked it was
+    realising no new coefficient is needed, because dT/dmass already prices
+    trapped material in seconds.
     """
     area = getattr(gate_outcome, "inaccessible_area_mm2", None)
     cid = getattr(gate_outcome, "stl_path", None) or "?"
@@ -126,10 +164,10 @@ def zero_penalties(gate_outcome: object) -> PenaltyInputs:
         _ZERO_PENALTY_WARNED.add(cid)
         warnings.warn(
             f"{area:.1f} mm^2 of this candidate's surface is unreachable by the "
-            f"cutter, and the manufacturing penalty applied for it is 0.0 s. No "
-            f"caller passes a penalty_provider, so unmanufacturable geometry "
-            f"ranks exactly as well as manufacturable geometry. Set one before "
-            f"trusting a final ranking.",
+            f"cutter, and the manufacturing penalty applied for it is 0.0 s "
+            f"because this run passed zero_penalties explicitly. Unmanufacturable "
+            f"geometry is ranking exactly as well as manufacturable geometry. "
+            f"Drop the override to get machinability_penalty, the default.",
             RuntimeWarning, stacklevel=2)
     return PenaltyInputs(manufacturing_penalty_s=0.0, rule_margin_penalty_s=0.0)
 
@@ -258,7 +296,7 @@ def run_inner_loop(
     initial_phi_grids: dict,
     out_dir: str,
     gradient_weights: GradientWeights,
-    penalty_provider: PenaltyProvider = zero_penalties,
+    penalty_provider: PenaltyProvider = machinability_penalty,
 ) -> InnerLoopResult:
     """Run the full inner loop for one candidate.
 
@@ -473,7 +511,8 @@ def _run_single_iteration(
     except Exception as exc:  # noqa: BLE001
         return failure("objective_failed", f"race objective failed: {exc}", snaps)
 
-    penalties = penalty_provider(gate)
+    penalties = penalty_provider(
+        gate, float(objective.gradients.get("dT_dmass", 0.0)))
     T_penalized = compose_penalized_time(objective.T_com_penalized, penalties)
 
     # T3.6: penalise an underweight car AND push the shape back out. Without the

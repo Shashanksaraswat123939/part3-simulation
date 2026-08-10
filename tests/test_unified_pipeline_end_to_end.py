@@ -31,6 +31,17 @@ import numpy as np  # noqa: E402
 import coarse  # noqa: E402
 coarse.use_spacing(3.0)
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _coarse_spacing():
+    """conftest restores the pristine spacing after each test; put this file's
+    3.0 mm back. Setting it at import only is why the full-suite run and
+    running this file alone disagreed."""
+    coarse.use_spacing(3.0)
+
+
 # The real thrust CSV lives beside part2 (installed there as the default).
 _CSV = str(_ROOT / "part2-simulation" / "co2_thrust_data.csv")
 _FHW = dict(

@@ -150,6 +150,57 @@ def test_iteration_budget_is_not_silently_discarded():
     )
 
 
+def test_decimation_survives_the_gentle_target_that_leaves_slivers():
+    """A MILD decimation must come back watertight too.
+
+    test_cfd_stl_is_under_budget_and_still_meets_part2_contract budgets at 25%
+    of the face count, which happens to be the regime that always worked. The
+    failure is at gentler targets: measured on the 81,688-face half-car, 25%
+    was watertight and 50% was not -- 4 degenerate triangles left edges shared
+    by more than two faces, with ZERO boundary loops. fill_holes, which was the
+    only repair, is a no-op on a mesh with no holes, so every backoff target
+    failed and the smoke run handed OpenFOAM the full 325,204-triangle mesh
+    against a 120,000 budget.
+
+    Testing only the aggressive target is why that shipped.
+    """
+    import unified_phi as up
+    from pipeline_interface import _decimate_for_cfd
+
+    import coarse
+    coarse.use_spacing(1.0)      # fine enough that decimation has slivers to make
+
+    geom = up.build_unified_geometry(130.0, 46.0, 20.0, init_mode="full",
+                                     with_cargo=False)
+    up.enforce_symmetry(geom)
+    raw = up.extract_half_surface(geom)
+    assert raw.is_watertight, "precondition: the source mesh is watertight"
+    # Without this the test still passes if someone coarsens the spacing above,
+    # because a small mesh decimates cleanly and never reaches the sliver
+    # regime -- it would go green while testing nothing.
+    assert len(raw.faces) > 50_000, (
+        f"source mesh is only {len(raw.faces):,} faces; too coarse to produce "
+        "the degenerate triangles this test exists to catch"
+    )
+
+    half = _decimate_for_cfd(raw, len(raw.faces) // 2)
+    assert len(half.faces) < len(raw.faces), (
+        f"decimation returned {len(half.faces)} of {len(raw.faces)} faces at a "
+        "50% budget -- it gave up and handed back the original"
+    )
+    assert half.is_watertight, (
+        "a 50% decimation came back non-watertight; the degenerate-face repair "
+        "in _repair_decimated is not running or no longer works"
+    )
+    # The repair deletes faces and refills the gaps, so prove it closed the mesh
+    # over the same shape rather than bridging across the body.
+    assert abs(half.volume - raw.volume) / raw.volume < 0.02, (
+        f"volume drifted {abs(half.volume - raw.volume) / raw.volume:.2%} -- "
+        "fill_holes bridged something it should not have"
+    )
+    assert min(half.vertices[:, 1]) >= -1e-6, "repair pushed vertices past y=0"
+
+
 def test_cfd_stl_is_under_budget_and_still_meets_part2_contract():
     """The decimated half-STL must stay a legal Part 2 input.
 

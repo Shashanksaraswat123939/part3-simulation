@@ -488,6 +488,32 @@ def _snap_symmetry_plane(mesh):
     return mesh
 
 
+def _repair_decimated(reduced) -> None:
+    """Close a decimated half-car in place. Order matters.
+
+    Quadric decimation does not open holes here -- measured on the 81,688-face
+    half-car, the 50% result had ZERO boundary loops yet is_watertight was
+    False, because 4 degenerate (zero-area) triangles left edges shared by more
+    than two faces. fill_holes on that mesh is a no-op: there is nothing to
+    fill. Dropping the degenerate faces is what creates the holes, and only
+    then does fill_holes close them.
+
+    The previous version called fill_holes alone and so never repaired
+    anything; every backoff target failed and OpenFOAM was handed the full
+    325,204-triangle mesh, with the slow snappyHexMesh and high memory the
+    warning describes.
+    """
+    try:
+        import trimesh
+        reduced.merge_vertices()
+        reduced.update_faces(reduced.nondegenerate_faces())
+        reduced.update_faces(reduced.unique_faces())
+        reduced.remove_unreferenced_vertices()
+        trimesh.repair.fill_holes(reduced)
+    except Exception:  # noqa: BLE001 -- decimation is an optimisation, never fatal
+        pass
+
+
 def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: int = 3):
     """Reduce a marching-cubes surface to a CFD-appropriate triangle count.
 
@@ -515,18 +541,15 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
                           RuntimeWarning, stacklevel=2)
             return _snap_symmetry_plane(mesh)
         if reduced is not None and len(reduced.faces):
-            # Decimation can open the surface near the y=0 cap. Try to close it
-            # before giving up on this target.
             if not reduced.is_watertight:
-                try:
-                    import trimesh
-                    trimesh.repair.fill_holes(reduced)
-                    reduced.remove_unreferenced_vertices()
-                except Exception:  # noqa: BLE001
-                    pass
+                _repair_decimated(reduced)
             if reduced.is_watertight:
                 return _snap_symmetry_plane(reduced)
-        target *= 2  # too aggressive — keep more detail and retry
+        # Backing off means keeping MORE detail. Note this is not reliably the
+        # safer direction: measured on the 81,688-face half-car, 25% decimation
+        # came back watertight and 50% did not. Gentler targets leave sliver
+        # triangles the aggressive pass would have collapsed outright.
+        target *= 2
     warnings.warn(
         f"STL decimation could not keep the surface watertight at any target up "
         f"to {target}; handing OpenFOAM the full {n}-triangle mesh. Expect slow "

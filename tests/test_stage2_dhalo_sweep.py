@@ -150,55 +150,70 @@ def test_iteration_budget_is_not_silently_discarded():
     )
 
 
-def test_decimation_survives_the_gentle_target_that_leaves_slivers():
-    """A MILD decimation must come back watertight too.
+def test_decimation_never_ships_a_worse_mesh_than_it_was_given():
+    """What reaches OpenFOAM is the original, or a mesh inside the envelope.
 
-    test_cfd_stl_is_under_budget_and_still_meets_part2_contract budgets at 25%
-    of the face count, which happens to be the regime that always worked. The
-    failure is at gentler targets: measured on the 81,688-face half-car, 25%
-    was watertight and 50% was not -- 4 degenerate triangles left edges shared
-    by more than two faces, with ZERO boundary loops. fill_holes, which was the
-    only repair, is a no-op on a mesh with no holes, so every backoff target
-    failed and the smoke run handed OpenFOAM the full 325,204-triangle mesh
-    against a 120,000 budget.
+    Three findings, in the order they were made:
 
-    Testing only the aggressive target is why that shipped.
+      * _repair_decimated: decimation does not open holes here, it leaves
+        degenerate triangles that make edges non-manifold. The old repair called
+        fill_holes on a mesh with ZERO boundary loops -- a no-op -- so every
+        backoff failed and the full 325,204-triangle mesh went to the solver.
+
+      * Fixing that made decimation succeed on watertightness and immediately
+        handed OpenFOAM min angle 0.08 deg with 3.71% of triangles under 10 deg,
+        against a measured-safe envelope of 8.6 deg / 0.01%. The decimated STL
+        is a different mesh from the one Part 1's _check_mesh_quality inspected
+        and never passes back through it, so nothing caught that.
+
+      * Quadric decimation targets face count, not angle quality (which
+        _repair_mesh's own docstring already said). Vertex merging takes 3.8%
+        slivers to 3.5% and breaks watertightness; Taubin gets the fraction to
+        0.4% but the min angle only to 2.3 deg, and >=10 iterations push
+        vertices 0.375 mm past y=0. So on this geometry the budget is simply
+        not reachable by decimation -- and the correct behaviour is to say so,
+        not to ship the degraded mesh.
     """
+    import warnings
+
+    import numpy as np
     import unified_phi as up
-    from pipeline_interface import _decimate_for_cfd
+    from pipeline_interface import _decimate_for_cfd, _within_measured_mesh_envelope
 
     import coarse
-    coarse.use_spacing(1.0)      # fine enough that decimation has slivers to make
+    coarse.use_spacing(1.0)
 
     geom = up.build_unified_geometry(130.0, 46.0, 20.0, init_mode="full",
                                      with_cargo=False)
     up.enforce_symmetry(geom)
     raw = up.extract_half_surface(geom)
     assert raw.is_watertight, "precondition: the source mesh is watertight"
-    # Without this the test still passes if someone coarsens the spacing above,
-    # because a small mesh decimates cleanly and never reaches the sliver
-    # regime -- it would go green while testing nothing.
     assert len(raw.faces) > 50_000, (
         f"source mesh is only {len(raw.faces):,} faces; too coarse to produce "
-        "the degenerate triangles this test exists to catch"
-    )
+        "the degenerate triangles this test exists to catch")
+    assert _within_measured_mesh_envelope(raw), (
+        "precondition: marching cubes + Taubin gives a mesh inside the envelope")
 
-    half = _decimate_for_cfd(raw, len(raw.faces) // 2)
-    assert len(half.faces) < len(raw.faces), (
-        f"decimation returned {len(half.faces)} of {len(raw.faces)} faces at a "
-        "50% budget -- it gave up and handed back the original"
-    )
-    assert half.is_watertight, (
-        "a 50% decimation came back non-watertight; the degenerate-face repair "
-        "in _repair_decimated is not running or no longer works"
-    )
-    # The repair deletes faces and refills the gaps, so prove it closed the mesh
-    # over the same shape rather than bridging across the body.
-    assert abs(half.volume - raw.volume) / raw.volume < 0.02, (
-        f"volume drifted {abs(half.volume - raw.volume) / raw.volume:.2%} -- "
-        "fill_holes bridged something it should not have"
-    )
-    assert min(half.vertices[:, 1]) >= -1e-6, "repair pushed vertices past y=0"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        half = _decimate_for_cfd(raw, len(raw.faces) // 2)
+
+    assert half.is_watertight, "whatever comes back must be watertight"
+    assert min(half.vertices[:, 1]) >= -1e-6, "half-car STL must keep y >= 0"
+
+    if len(half.faces) < len(raw.faces):
+        # It reduced -- then it must have stayed inside the envelope.
+        assert _within_measured_mesh_envelope(half), (
+            "decimation returned a reduced mesh that is OUTSIDE the measured "
+            "envelope; that is the 0.08 deg mesh going to OpenFOAM again")
+        assert abs(half.volume - raw.volume) / raw.volume < 0.02, "volume drifted"
+    else:
+        # It declined -- then it must have SAID so. Silence here is the
+        # original bug: a 325k mesh sailing through with no signal.
+        assert any(issubclass(w.category, RuntimeWarning)
+                   and "measured-safe envelope" in str(w.message)
+                   for w in caught), (
+            "decimation declined to reduce and issued no warning naming why")
 
 
 def test_cfd_stl_is_under_budget_and_still_meets_part2_contract():
@@ -227,10 +242,18 @@ def test_cfd_stl_is_under_budget_and_still_meets_part2_contract():
     # fact a silent no-op on the real production mesh.
     budget = max(len(raw.faces) // 4, 64)
     half = _decimate_for_cfd(raw, budget)
-    assert len(half.faces) < len(raw.faces), (
-        f"decimation did not reduce {len(raw.faces)} faces at budget {budget} — "
-        "it must reduce or warn, never silently return the original"
-    )
+    # "reduce or warn, never silently return the original" -- warning is a
+    # legitimate outcome, and since the envelope gate went in it is the usual
+    # one: quadric decimation cannot hit the budget without wrecking the
+    # triangle angles. See test_decimation_never_ships_a_worse_mesh_than_it_was_given.
+    if len(half.faces) >= len(raw.faces):
+        from pipeline_interface import _within_measured_mesh_envelope
+        assert half is not None and half.is_watertight
+        assert not _within_measured_mesh_envelope(
+            raw.simplify_quadric_decimation(face_count=budget)), (
+            f"decimation returned all {len(raw.faces)} faces at budget {budget}, "
+            "but a reduced mesh WOULD have met the envelope -- it should have "
+            "been accepted")
     assert half.is_watertight, "decimated mesh must stay watertight for Part 2"
     assert abs(half.volume - raw.volume) / raw.volume < 0.02, "volume drifted >2%"
     assert STL_TRIANGLE_BUDGET >= 60_000, "budget must stay above the hole threshold"
@@ -491,3 +514,55 @@ if __name__ == "__main__":
         _run(getattr(_mod, _n))
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)
+
+
+def test_manufacturing_penalty_is_charged_and_scales_with_blocked_area():
+    """Unmanufacturable geometry must cost seconds, not warn and rank equal.
+
+    zero_penalties was the default for the whole project: every candidate in
+    the 2026-07-29 sweep was logged "geometry_repaired" -- the accessibility
+    check DID find unreachable surface -- while paying 0.0 s for it, so an
+    unmakeable shape ranked exactly as well as a makeable one.
+
+    The magnitude is not a free coefficient: blocked area x MIN_RADIUS_M x
+    rho_body is the material the cutter must leave behind, and dT/dmass (from
+    Part 2, per candidate) converts kilograms to seconds.
+    """
+    from types import SimpleNamespace
+
+    from inner_loop import machinability_penalty, zero_penalties
+    from geometry_contract import DENSITY_BODY_KGM3, MIN_RADIUS_M
+
+    dT_dmass = 17.4478           # s/kg, the live value from the 2026-07-29 run
+
+    clean = SimpleNamespace(inaccessible_area_mm2=0.0, stl_path="clean")
+    assert machinability_penalty(clean, dT_dmass).total_s == 0.0, \
+        "a fully machinable car must pay nothing"
+
+    blocked = SimpleNamespace(inaccessible_area_mm2=165.8, stl_path="blocked")
+    pen = machinability_penalty(blocked, dT_dmass).manufacturing_penalty_s
+    expected = dT_dmass * (165.8e-6 * MIN_RADIUS_M * DENSITY_BODY_KGM3)
+    assert abs(pen - expected) / expected < 1e-9, f"{pen} != {expected}"
+    assert pen > 0.0, "blocked surface must cost something"
+
+    # Scales with the defect rather than being a flat fine.
+    worse = SimpleNamespace(inaccessible_area_mm2=1658.0, stl_path="worse")
+    assert abs(machinability_penalty(worse, dT_dmass).manufacturing_penalty_s
+               - 10.0 * pen) / (10.0 * pen) < 1e-9, "penalty must be linear in area"
+
+    # A negative dT/dmass (T3.6 floor pushing mass back out) must not turn the
+    # penalty into a reward for being unmachinable.
+    assert machinability_penalty(blocked, -50.0).total_s == 0.0, \
+        "penalty must floor at zero when the objective wants more mass"
+
+    # The opt-out still exists and still reports what it is ignoring.
+    assert zero_penalties(blocked, dT_dmass).total_s == 0.0
+
+    # And it is no longer what the loop uses by default.
+    import inspect
+    import inner_loop as il
+    default = inspect.signature(il.run_inner_loop).parameters["penalty_provider"].default
+    assert default is machinability_penalty, (
+        f"inner loop default provider is {default}, not machinability_penalty -- "
+        "unmanufacturable geometry is ranking free again"
+    )

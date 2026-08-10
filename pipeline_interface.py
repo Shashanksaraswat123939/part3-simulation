@@ -450,6 +450,12 @@ def real_bindings(
 # you move to "fine" resolution or raise underbody_refinement_level.
 STL_TRIANGLE_BUDGET = 120_000
 
+# Re-exported so the decimation warning can name the envelope it failed. One
+# source of truth: surface_extraction owns these, set from real solver runs.
+from surface_extraction import (  # noqa: E402
+    MEASURED_SAFE_MIN_ANGLE_DEG, MEASURED_SAFE_SLIVER_FRACTION,
+)
+
 
 # How far below the symmetry plane a vertex may drift and still be treated as
 # rounding rather than a broken half. Quadric decimation moves vertices to
@@ -486,6 +492,37 @@ def _snap_symmetry_plane(mesh):
         )
     mesh.vertices[below, 1] = 0.0
     return mesh
+
+
+def _within_measured_mesh_envelope(mesh) -> bool:
+    """Is this mesh inside the envelope snappyHexMesh was actually measured on?
+
+    The decimated STL is a DIFFERENT mesh from the one Part 1's
+    _check_mesh_quality inspected, and it never passes back through that gate --
+    so nothing checked it. Making decimation succeed (it had never accepted a
+    result at all, see _repair_decimated) promptly handed OpenFOAM a mesh with
+    min angle 0.08 deg and 3.71% of triangles under 10 deg, against a measured
+    envelope of 8.6 deg and 0.01%. That is 371x the sliver fraction anything has
+    been measured at, and it went out silently.
+
+    Thresholds are imported, not copied: surface_extraction owns them, and they
+    came from meshing real carved STLs on openfoam2412 (8.65-14.19 deg, 0-3
+    slivers, "Detected 0 illegal faces" every time). Widen them there, with
+    evidence from a solver run, never here.
+    """
+    import numpy as _np
+    from surface_extraction import (MEASURED_SAFE_MIN_ANGLE_DEG,
+                                    MEASURED_SAFE_SLIVER_FRACTION)
+    try:
+        worst_per_face = _np.degrees(mesh.face_angles).min(axis=1)
+    except Exception:  # noqa: BLE001 -- cannot measure => cannot certify
+        return False
+    if not len(worst_per_face):
+        return False
+    min_angle = float(worst_per_face.min())
+    sliver_fraction = float((worst_per_face < 10.0).mean())
+    return (min_angle >= MEASURED_SAFE_MIN_ANGLE_DEG
+            and sliver_fraction <= MEASURED_SAFE_SLIVER_FRACTION)
 
 
 def _repair_decimated(reduced) -> None:
@@ -543,7 +580,7 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
         if reduced is not None and len(reduced.faces):
             if not reduced.is_watertight:
                 _repair_decimated(reduced)
-            if reduced.is_watertight:
+            if reduced.is_watertight and _within_measured_mesh_envelope(reduced):
                 return _snap_symmetry_plane(reduced)
         # Backing off means keeping MORE detail. Note this is not reliably the
         # safer direction: measured on the 81,688-face half-car, 25% decimation
@@ -551,9 +588,21 @@ def _decimate_for_cfd(mesh, budget: int = STL_TRIANGLE_BUDGET, _max_backoffs: in
         # triangles the aggressive pass would have collapsed outright.
         target *= 2
     warnings.warn(
-        f"STL decimation could not keep the surface watertight at any target up "
-        f"to {target}; handing OpenFOAM the full {n}-triangle mesh. Expect slow "
-        f"snappyHexMesh and high memory in _normalise_solid_name.",
+        f"STL decimation produced no mesh inside the measured-safe envelope at "
+        f"any target up to {target}; handing OpenFOAM the full {n}-triangle mesh "
+        f"({budget} budget). Expect slow snappyHexMesh and high memory.\n"
+        f"This is a real limit, not a tuning knob: quadric decimation targets "
+        f"face count, not angle quality. Measured on the 81,688-face half-car, "
+        f"a 50% reduction gives min angle 0.00 deg with 3.8% of triangles under "
+        f"10 deg, against an envelope of "
+        f"{MEASURED_SAFE_MIN_ANGLE_DEG} deg / "
+        f"{100.0 * MEASURED_SAFE_SLIVER_FRACTION:.2f}%. Neither hole repair, "
+        f"vertex merging (3.8% -> 3.5%, and it breaks watertightness) nor Taubin "
+        f"smoothing (fraction 3.8% -> 0.4% but min angle only reaches 2.3 deg, "
+        f"and >=10 iterations push vertices 0.375 mm past the y=0 plane) closes "
+        f"the gap. The routes to a smaller STL are a coarser extraction grid or "
+        f"a quality-preserving decimator -- or mesh one of these on the solver "
+        f"and widen the envelope in surface_extraction with the evidence.",
         RuntimeWarning, stacklevel=2,
     )
     return _snap_symmetry_plane(mesh)

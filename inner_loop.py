@@ -117,9 +117,14 @@ def machinability_penalty(gate_outcome: object,
 
         penalty_s = dT/dmass * (blocked_area * MIN_RADIUS_M * rho_body)
 
-    On the 2026-08-10 car: 165.8 mm^2 blocked -> 0.085 g trapped -> ~1.5 ms
-    against a ~1.2 s race. Small, because the car is nearly machinable; it
-    grows with the defect rather than being a fixed fine.
+    On the 2026-08-10 car, measured live at 0.5 mm: 4,942 mm^2 blocked ->
+    2.54 g the cutter must leave -> ~44 ms against a 2.6 s race, about 1.7%.
+    It grows with the defect rather than being a fixed fine.
+
+    That figure is for the FULL car. An earlier version of this docstring said
+    166 mm^2 / ~1.5 ms, measured on the HALF mesh -- where a shadow ray escapes
+    through the missing y<0 half and undercuts read as reachable, understating
+    by 29x. See _find_inaccessible_faces.
 
     This replaces zero_penalties as the default. Read that function's docstring
     for what the gap cost: every candidate in the 2026-07-29 sweep was logged

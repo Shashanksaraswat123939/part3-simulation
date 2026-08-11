@@ -194,3 +194,55 @@ if __name__ == "__main__":
             _failed += 1
     print(f"{_passed} passed, {_failed} failed")
     _sys.exit(1 if _failed else 0)
+
+
+def test_an_illegal_candidate_is_never_converged():
+    """Small steps while under the T3.6 floor must not end the run.
+
+    Measured on the live 2026-08-10 sweep: every candidate stopped after 4 of
+    25 iterations with reason delta_T_below_threshold and converged=True, on
+    deltas of 3.3, 1.9 and 1.9 ms -- while the car sat at 47.30 g against a
+    48 g minimum and the barrier was actively pushing mass back out. The
+    objective moves slowly there because the HJ step is CFL-limited, not
+    because the shape is finished, so "the objective stopped moving" and "the
+    car is done" are different claims. Only the second is convergence.
+    """
+    from convergence import ConvergenceTracker, REASON_BUDGET
+
+    def fresh():
+        return ConvergenceTracker(iteration_budget=25,
+                                  delta_t_threshold_s=0.015,
+                                  gradient_norm_threshold=1e-6)
+
+    # Feasible: a run of tiny steps converges, as it should.
+    t = fresh()
+    st = None
+    for _ in range(8):
+        st = t.update_success(1.5, 1.0, feasible=True)
+        if st.stop:
+            break
+    assert st.stop and st.converged, "a legal, flattened candidate should converge"
+
+    # Infeasible: the identical sequence must NOT converge.
+    t = fresh()
+    for i in range(24):
+        st = t.update_success(1.5, 1.0, feasible=False)
+        assert not st.converged, f"declared converged while illegal at step {i}"
+        assert not st.stop, f"stopped early while illegal at step {i}"
+
+    # It still stops at the budget -- blocking convergence must not grant
+    # unlimited iterations.
+    st = t.update_success(1.5, 1.0, feasible=False)
+    assert st.stop and not st.converged and st.reason == REASON_BUDGET, (
+        f"expected budget stop, got stop={st.stop} reason={st.reason!r}")
+
+    # Becoming legal lets convergence resume from a fresh run of small steps.
+    t = fresh()
+    for _ in range(5):
+        t.update_success(1.5, 1.0, feasible=False)
+    st = None
+    for _ in range(8):
+        st = t.update_success(1.5, 1.0, feasible=True)
+        if st.stop:
+            break
+    assert st.stop and st.converged, "should converge once legal and flat"

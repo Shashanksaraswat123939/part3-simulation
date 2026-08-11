@@ -367,9 +367,18 @@ def run_inner_loop(
         if outcome is not None and outcome.T_penalized is not None:
             if best is None or outcome.T_penalized < best.T_penalized:
                 best = outcome
+            # A candidate under the T3.6 floor is not converged, however
+            # small its steps have become -- see ConvergenceTracker.update_
+            # success. Read from the iteration's own mass so this cannot drift
+            # from what the barrier acted on.
+            _feasible = True
+            if log.total_mass_kg is not None:
+                _feasible = (log.total_mass_kg - _T36_CARTRIDGE_KG
+                             >= T36_MIN_COMPETITION_MASS_KG)
             status = tracker.update_success(
                 outcome.T_penalized,
                 log.gradient_norm if log.gradient_norm is not None else math.inf,
+                feasible=_feasible,
             )
         else:
             status = tracker.update_failure()

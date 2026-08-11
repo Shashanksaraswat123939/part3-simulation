@@ -99,8 +99,24 @@ class ConvergenceTracker:
             return ConvergenceStatus(stop=True, reason=REASON_GATE_FAILURES, converged=False)
         return self._budget_check()
 
-    def update_success(self, T_penalized: float, gradient_norm: float) -> ConvergenceStatus:
-        """Record a successful objective evaluation."""
+    def update_success(self, T_penalized: float, gradient_norm: float,
+                       feasible: bool = True) -> ConvergenceStatus:
+        """Record a successful objective evaluation.
+
+        feasible=False means the candidate breaks a hard rule right now (in
+        practice the T3.6 minimum mass). Such a candidate CANNOT be converged,
+        however still the objective is moving: the live 2026-08-10 sweep stopped
+        every candidate after 4 of 25 iterations on deltas of 3.3, 1.9 and
+        1.9 ms while the car sat at 47.30 g against a 48 g floor, and recorded
+        the result as converged=True. The barrier was pushing mass back out the
+        whole time; it just moves the objective slowly, because the HJ step is
+        CFL-limited rather than proportional to the gradient. So "the objective
+        stopped moving" and "the car is finished" are different statements, and
+        only the second deserves the word converged.
+
+        An infeasible iteration still counts toward the budget -- this blocks
+        early success, it does not grant unlimited iterations.
+        """
         if not (isinstance(T_penalized, (int, float)) and math.isfinite(T_penalized)):
             raise ValueError(f"T_penalized must be finite, got {T_penalized!r}")
         if not (isinstance(gradient_norm, (int, float)) and math.isfinite(gradient_norm)
@@ -123,6 +139,16 @@ class ConvergenceTracker:
         # when the objective really has flattened: it just takes N iterations to
         # say so. This makes the criterion STRICTER, not looser -- it was
         # producing false convergence, which is the expensive direction.
+        if not feasible:
+            # Small steps while illegal say nothing about being finished; a run
+            # of them must not accumulate toward convergence.
+            self._consecutive_small_steps = 0
+            self._last_T = T_penalized
+            if self._iterations >= self._budget:
+                return ConvergenceStatus(stop=True, reason=REASON_BUDGET,
+                                         converged=False)
+            return ConvergenceStatus(stop=False, reason="", converged=False)
+
         if self._last_T is not None and abs(T_penalized - self._last_T) < self._delta_t:
             self._consecutive_small_steps += 1
             self._last_T = T_penalized

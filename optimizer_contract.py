@@ -114,7 +114,23 @@ D_HALO_PLACEMENT_MARGIN_MM: float = 34.0   # 50mm pocket - 16mm Ref_A offset
 # good enough; here it is the measurement that binds. Tighten this the moment
 # the force oscillation is fixed -- it should track the noise, not sit at a
 # round number.
-INNER_CONVERGENCE_DELTA_T_S: float = 15e-3
+# 4 ms, was 15 ms. The comment above said to tighten this "the moment the force
+# oscillation is fixed -- it should track the noise, not sit at a round number".
+# It is fixed: force_oscillation was peak-to-peak (max-minus-min, set by one
+# outlier, does not shrink with a longer window), and the error on the MEAN --
+# which is what D20 is -- is now measured properly by force_mean_convergence.
+#
+# Measured over the 2026-08-13 sweep, median dT/dD20 = 0.449 s/N, D20 = 0.287 N:
+#     peak-to-peak            17.2%   -> 22.2 ms    <- where 15 ms came from
+#     stderr of the mean       0.70%  ->  0.90 ms
+#     geometry/remesh spread   1.2-3% ->  1.5-3.9 ms
+# The binding term is remeshing between near-identical shapes, not force
+# averaging. 4 ms sits just above it, and INNER_CONVERGENCE_CONSECUTIVE still
+# requires three in a row, so a chance triple is very unlikely.
+#
+# Consequence: candidates no longer stop after 4-7 iterations with the drag
+# still falling. They run longer. That is the point.
+INNER_CONVERGENCE_DELTA_T_S: float = 4e-3
 # ...and it must hold for this many CONSECUTIVE iterations before the inner loop
 # calls itself converged.
 #
@@ -127,6 +143,33 @@ INNER_CONVERGENCE_DELTA_T_S: float = 15e-3
 INNER_CONVERGENCE_CONSECUTIVE: int = 3
 DEFAULT_GRADIENT_NORM_THRESHOLD: float = 1e-6
 MAX_CONSECUTIVE_GATE_FAILURES: int = 3          # "3+ consecutive iterations"
+# ---------------------------------------------------------------------------
+# AERO-ONLY PHASE
+#
+# Once the car is AT the T3.6 floor there is no mass left to give: the mass
+# gradient and the barrier fight to a standstill, and since mass carries ~94% of
+# the shape update (phi_updater logs the split every iteration) the aero channel
+# never gets to shape anything. Every candidate in the 2026-08-13 sweep
+# converged in 4-7 iterations with a flat floor and un-faired keep-out notches,
+# because a 2-3% drag gain moves T_pen less than the convergence threshold.
+#
+# So when the car is comfortably legal, drop w_mass to zero and let the drag
+# adjoint drive alone. Two guards:
+#
+#   * HYSTERESIS. Enter only above floor + ENTRY margin, leave as soon as it
+#     falls below floor + EXIT margin, so the T3.6 barrier can always re-engage.
+#     Without the gap it would flap between phases on measurement noise.
+#   * The barrier gradient is NOT part of w_mass. inner_loop REPLACES dT_dmass
+#     with the restoring gradient when underweight, so leaving the aero phase
+#     restores it. An aero-only phase can therefore never carve a car illegal
+#     and leave it there.
+AERO_PHASE_ENTRY_MARGIN_KG: float = 0.0004     # 0.4 g clear of the floor
+AERO_PHASE_EXIT_MARGIN_KG: float = 0.0001      # 0.1 g -- re-engage mass early
+# In the aero phase T_pen barely moves (drag is a small part of race time), so
+# convergence there is measured on D20 itself. 1.5% is ~1.5x the iteration-to-
+# iteration noise on a mean whose stderr is 0.7% (sqrt(2)*0.7 = 1.0%).
+AERO_CONVERGENCE_DELTA_D20_FRAC: float = 0.015
+
 DEFAULT_ITERATION_BUDGET: int = 100
 
 # ---------------------------------------------------------------------------

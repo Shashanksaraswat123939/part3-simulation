@@ -78,6 +78,7 @@ class ConvergenceTracker:
         if required_small_steps < 1:
             raise ValueError("required_small_steps must be >= 1")
         self._budget = iteration_budget
+        self._last_metric = None
         self._grad_threshold = gradient_norm_threshold
         self._delta_t = delta_t_threshold_s
         self._max_fail = max_consecutive_gate_failures
@@ -100,7 +101,8 @@ class ConvergenceTracker:
         return self._budget_check()
 
     def update_success(self, T_penalized: float, gradient_norm: float,
-                       feasible: bool = True) -> ConvergenceStatus:
+                       feasible: bool = True, metric: float | None = None,
+                       metric_threshold: float | None = None) -> ConvergenceStatus:
         """Record a successful objective evaluation.
 
         feasible=False means the candidate breaks a hard rule right now (in
@@ -116,6 +118,13 @@ class ConvergenceTracker:
 
         An infeasible iteration still counts toward the budget -- this blocks
         early success, it does not grant unlimited iterations.
+
+        metric / metric_threshold: converge on something OTHER than T_penalized.
+        Used by the aero-only phase, where the mass channel is switched off and
+        T_pen barely moves -- a 2-3% drag gain is worth ~3 ms of race time, so a
+        T_pen test cannot see the very thing being optimised. Passing D20 and a
+        drag-noise threshold makes the criterion measure the quantity actually
+        being descended. Both must be given together.
         """
         if not (isinstance(T_penalized, (int, float)) and math.isfinite(T_penalized)):
             raise ValueError(f"T_penalized must be finite, got {T_penalized!r}")
@@ -149,9 +158,18 @@ class ConvergenceTracker:
                                          converged=False)
             return ConvergenceStatus(stop=False, reason="", converged=False)
 
-        if self._last_T is not None and abs(T_penalized - self._last_T) < self._delta_t:
-            self._consecutive_small_steps += 1
+        # Which quantity is being tested for flatness, and against what.
+        if metric is not None and metric_threshold is not None:
+            value, threshold, last = metric, metric_threshold, self._last_metric
+            self._last_metric = metric
             self._last_T = T_penalized
+        else:
+            value, threshold, last = T_penalized, self._delta_t, self._last_T
+            self._last_T = T_penalized
+            self._last_metric = None
+
+        if last is not None and abs(value - last) < threshold:
+            self._consecutive_small_steps += 1
             if self._consecutive_small_steps >= self._required_small_steps:
                 return ConvergenceStatus(stop=True, reason=REASON_DELTA_T,
                                          converged=True)

@@ -46,6 +46,9 @@ from convergence import ConvergenceTracker, REASON_BUDGET
 from gradient_combiner import scalar_gradient_norm
 from objective_policy import compose_penalized_time
 from optimizer_contract import (
+    AERO_CONVERGENCE_DELTA_D20_FRAC,
+    AERO_PHASE_ENTRY_MARGIN_KG,
+    AERO_PHASE_EXIT_MARGIN_KG,
     CandidateOutcome,
     OptimizerConfig,
     GradientWeights,
@@ -340,14 +343,26 @@ def run_inner_loop(
     stop_reason = REASON_BUDGET
     converged = False
 
+    # Aero-only phase. At the T3.6 floor there is no mass left to give, and the
+    # mass channel carries ~94% of the shape update, so the drag adjoint never
+    # gets to shape anything. Above floor+ENTRY we zero w_mass and let it drive
+    # alone; below floor+EXIT we hand control back so the barrier can re-engage.
+    # The gap between the two margins is hysteresis -- without it this flaps on
+    # measurement noise.
+    aero_phase = False
+
     iteration = 0
     while True:
         iteration += 1
         iter_id = _iter_candidate_id(candidate_id, iteration)
 
+        _weights = gradient_weights
+        if aero_phase:
+            import dataclasses as _dc
+            _weights = _dc.replace(gradient_weights, w_mass=0.0)
         outcome, log, phi_snapshot_paths = _run_single_iteration(
             bindings, config, iter_id, W_mm, x_front_mm, d_halo_mm, phi_grids, out_dir,
-            gradient_weights, penalty_provider, iteration,
+            _weights, penalty_provider, iteration,
         )
         history.append(log)
         # One line per iteration, unconditionally. Without it a run that ends
@@ -372,13 +387,36 @@ def run_inner_loop(
             # success. Read from the iteration's own mass so this cannot drift
             # from what the barrier acted on.
             _feasible = True
+            _comp = None
             if log.total_mass_kg is not None:
-                _feasible = (log.total_mass_kg - _T36_CARTRIDGE_KG
-                             >= T36_MIN_COMPETITION_MASS_KG)
+                _comp = log.total_mass_kg - _T36_CARTRIDGE_KG
+                _feasible = _comp >= T36_MIN_COMPETITION_MASS_KG
+
+            # Phase switch, with hysteresis (see `aero_phase` above).
+            if _comp is not None:
+                _was = aero_phase
+                if aero_phase:
+                    if _comp < T36_MIN_COMPETITION_MASS_KG + AERO_PHASE_EXIT_MARGIN_KG:
+                        aero_phase = False
+                elif _comp >= T36_MIN_COMPETITION_MASS_KG + AERO_PHASE_ENTRY_MARGIN_KG:
+                    aero_phase = True
+                if aero_phase != _was:
+                    print(f"[phase] {iter_id}: "
+                          f"{'AERO-ONLY (w_mass=0)' if aero_phase else 'mass+aero'} "
+                          f"at {_comp * 1000:.2f} g competition", flush=True)
+
+            # In the aero phase converge on D20, not T_pen: with w_mass off,
+            # race time barely moves and the T_pen test cannot see the drag
+            # reduction it is supposed to be waiting on.
+            _metric = _thr = None
+            if aero_phase and log.D20 is not None:
+                _metric = log.D20
+                _thr = AERO_CONVERGENCE_DELTA_D20_FRAC * abs(log.D20)
+
             status = tracker.update_success(
                 outcome.T_penalized,
                 log.gradient_norm if log.gradient_norm is not None else math.inf,
-                feasible=_feasible,
+                feasible=_feasible, metric=_metric, metric_threshold=_thr,
             )
         else:
             status = tracker.update_failure()

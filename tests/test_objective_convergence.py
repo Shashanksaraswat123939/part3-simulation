@@ -246,3 +246,71 @@ def test_an_illegal_candidate_is_never_converged():
         if st.stop:
             break
     assert st.stop and st.converged, "should converge once legal and flat"
+
+
+def test_aero_phase_converges_on_drag_not_race_time():
+    """With the mass channel off, convergence must watch the drag.
+
+    Once the car is at the T3.6 floor there is no mass left to give, so the
+    aero-only phase zeroes w_mass and lets the drag adjoint drive. But drag is
+    a small part of race time -- dT/dD20 = 0.449 s/N against D20 = 0.287 N, so
+    a 3% drag reduction is worth ~3.9 ms. Against even the tightened 4 ms T_pen
+    threshold that reads as "flat", and the loop would stop while the thing it
+    switched phase to optimise is still improving.
+    """
+    from convergence import ConvergenceTracker
+    from optimizer_contract import (AERO_CONVERGENCE_DELTA_D20_FRAC,
+                                    INNER_CONVERGENCE_DELTA_T_S)
+
+    def fresh():
+        return ConvergenceTracker(iteration_budget=50,
+                                  gradient_norm_threshold=1e-6)
+
+    # A 3% drag fall per iteration moves T_pen ~3.9 ms -- under the T_pen
+    # threshold, so the default test calls it converged and stops.
+    t = fresh()
+    tpen, st = 1.5400, None
+    for _ in range(6):
+        tpen -= 0.0039
+        st = t.update_success(tpen, 1.0)
+        if st.stop:
+            break
+    assert st.stop, ("premise: a 3.9 ms/iteration fall reads as flat against "
+                     f"the {INNER_CONVERGENCE_DELTA_T_S*1000:.0f} ms T_pen threshold")
+
+    # Same run, judged on D20: 3% per iteration is well above the drag
+    # threshold, so it keeps going.
+    t = fresh()
+    tpen, d20 = 1.5400, 0.2870
+    for i in range(6):
+        tpen -= 0.0039
+        d20 *= 0.97
+        st = t.update_success(tpen, 1.0, metric=d20,
+                              metric_threshold=AERO_CONVERGENCE_DELTA_D20_FRAC * d20)
+        assert not st.stop, f"stopped at step {i} while drag was still falling 3%"
+
+    # And it DOES stop once drag genuinely flattens.
+    for _ in range(6):
+        d20 *= 0.999                     # 0.1%, well inside the noise band
+        st = t.update_success(tpen, 1.0, metric=d20,
+                              metric_threshold=AERO_CONVERGENCE_DELTA_D20_FRAC * d20)
+        if st.stop:
+            break
+    assert st.stop and st.converged, "should converge once drag stops moving"
+
+
+def test_aero_phase_hysteresis_cannot_strand_an_illegal_car():
+    """Entry and exit margins must not overlap, and exit must be the lower one.
+
+    The aero phase zeroes w_mass, which also zeroes the T3.6 restoring gradient
+    (inner_loop REPLACES dT_dmass with it when underweight). If the phase could
+    latch while the car was below the floor, nothing would push mass back and
+    the candidate would be stranded illegal.
+    """
+    from optimizer_contract import (AERO_PHASE_ENTRY_MARGIN_KG,
+                                    AERO_PHASE_EXIT_MARGIN_KG)
+    assert AERO_PHASE_EXIT_MARGIN_KG < AERO_PHASE_ENTRY_MARGIN_KG, (
+        "exit margin must sit below entry, or the phase flaps on noise")
+    assert AERO_PHASE_EXIT_MARGIN_KG >= 0.0, (
+        "exit margin below the floor would hand control back only once the car "
+        "is already illegal")

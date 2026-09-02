@@ -566,3 +566,57 @@ def test_manufacturing_penalty_is_charged_and_scales_with_blocked_area():
         f"inner loop default provider is {default}, not machinability_penalty -- "
         "unmanufacturable geometry is ranking free again"
     )
+
+
+def test_independent_d_halo_does_not_carry_the_previous_result_forward():
+    """The sweep must be able to give every d_halo the same starting point.
+
+    Warm-starting each d_halo from the previous one's converged field means
+    every value after the first begins from a MORE CARVED car. Race time here
+    is dominated by mass, so a comparison across the sweep then ranks carve
+    depth rather than halo position -- merge_results already refuses to trust
+    the ordering for that reason.
+
+    Measured on the 2026-08-11 sweep: d_halo 57.58 opened at 67.76 g having
+    inherited 29.86's 70.30 g result, against a shared Stage 1 seed of ~70.9 g.
+
+    Warm starting stays the default because it is cheaper; this asserts the
+    opt-out actually opts out.
+    """
+    import wheelbase_sweep as ws
+
+    seen = []
+
+    def fake_optimize(bindings, config, W_mm, x_front_mm, d_halo_mm, *a, **kw):
+        seen.append((d_halo_mm, kw.get("warm_start_grids")))
+        return ws.WResult(W_mm=W_mm,
+                          best=ws.CandidateOutcome(
+                              candidate_id=f"c{d_halo_mm}", W_mm=W_mm,
+                              x_front_mm=x_front_mm, d_halo_mm=d_halo_mm,
+                              lifecycle_state="converged", T_raw=1.0,
+                              T_penalized=1.0, failure_reason=None,
+                              phi_snapshot_paths={}, record_path=""),
+                          best_phi_grids={"marker": d_halo_mm})
+
+    original = ws.optimize_single_w
+    ws.optimize_single_w = fake_optimize
+    try:
+        seen.clear()
+        ws.run_d_halo_sweep(
+            bindings=object(), config=object(), d_halo_list=[16.0, 30.0, 44.0],
+            W_mm=130.0, x_front_mm=46.0, n_candidates=1, out_dir="/tmp",
+            gradient_weights=object(), warm_start_across_d_halo=False)
+        assert [w for _d, w in seen] == [None, None, None], (
+            f"independent sweep still carried a field forward: {seen}")
+
+        seen.clear()
+        ws.run_d_halo_sweep(
+            bindings=object(), config=object(), d_halo_list=[16.0, 30.0, 44.0],
+            W_mm=130.0, x_front_mm=46.0, n_candidates=1, out_dir="/tmp",
+            gradient_weights=object(), warm_start_across_d_halo=True)
+        carried = [w for _d, w in seen]
+        assert carried[0] is None, "the first d_halo has nothing to inherit"
+        assert carried[1] == {"marker": 16.0} and carried[2] == {"marker": 30.0}, (
+            f"default should still warm-start for throughput: {carried}")
+    finally:
+        ws.optimize_single_w = original

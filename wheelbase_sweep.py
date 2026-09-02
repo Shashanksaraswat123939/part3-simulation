@@ -388,6 +388,7 @@ def run_d_halo_sweep(
     gradient_weights: GradientWeights,
     failure_memory: Optional[FailureRegionMemory] = None,
     n_evolution_rounds: int = 3,
+    warm_start_across_d_halo: bool = True,
 ) -> list[WResult]:
     """Stage 2 of the two-stage architecture: sweep d_halo at FIXED W/x_front.
 
@@ -428,5 +429,22 @@ def run_d_halo_sweep(
             candidate_prefix=f"dhalo{d:g}",
         )
         results.append(result)
-        warm = result.best_phi_grids if result.best is not None else None
+        # CONFOUND. Carrying the previous d_halo's converged field into the next
+        # means every value after the first starts from a MORE CARVED car, so a
+        # comparison across the sweep mixes halo position with accumulated carve
+        # depth -- and race time here is dominated by mass, so carve depth wins.
+        # merge_results already refuses to believe the ordering for exactly this
+        # reason ("this ranks carve depth, not halo position").
+        #
+        # Measured on the 2026-08-11 sweep: d_halo 57.58 opened at 67.76 g,
+        # having inherited 29.86's 70.30 g result, where the shared Stage 1 seed
+        # is ~70.9 g. Three grams of the gap between those two d_halo values was
+        # just where the previous one had got to.
+        #
+        # Warm starting remains right for THROUGHPUT -- it is why a sweep costs
+        # less than N independent runs. It is wrong when the sweep IS the
+        # experiment, which is what Stage 2 is for, so the caller chooses. Off
+        # => every d_halo starts from the same Stage 1 seed.
+        if warm_start_across_d_halo:
+            warm = result.best_phi_grids if result.best is not None else None
     return results

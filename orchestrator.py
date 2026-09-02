@@ -130,6 +130,7 @@ def run_stage2_dhalo_search(
     n_finalists_for_robustness: int = 3,
     refine: bool = True,
     d_halo_list: Optional[list] = None,
+    warm_start_across_d_halo: bool = True,
 ) -> SearchResult:
     """Stage 2 of the two-stage architecture: sweep d_halo at FIXED W/x_front.
 
@@ -168,6 +169,7 @@ def run_stage2_dhalo_search(
         n_candidates=config.coarse_candidates_per_w,
         out_dir=out_dir, gradient_weights=gradient_weights,
         failure_memory=failure_memory, n_evolution_rounds=n_evolution_rounds,
+        warm_start_across_d_halo=warm_start_across_d_halo,
     )
 
     scored = sorted(

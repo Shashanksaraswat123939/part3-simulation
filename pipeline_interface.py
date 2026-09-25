@@ -648,6 +648,7 @@ def unified_bindings(
     ballast_material: Optional[str] = "lead",
     hj_max_substeps: int = 6,
     hj_trust_radius_m: float = 1.0e-3,
+    hj_aero_smooth_m: float = 0.0,
 ) -> PipelineBindings:
     """Bind Part 3 to the UNIFIED single-field geometry + the real objective.
 
@@ -975,6 +976,7 @@ def unified_bindings(
              "w_com": weights.w_com, "w_mfg": weights.w_mfg},
             objective_gradients, mass_report,
             max_substeps=hj_max_substeps, trust_radius_m=hj_trust_radius_m,
+            aero_smooth_m=hj_aero_smooth_m,
         )
 
     def write_record(outcome: dict) -> str:

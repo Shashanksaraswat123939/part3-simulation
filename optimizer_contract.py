@@ -323,6 +323,15 @@ class PenaltyInputs:
         return self.manufacturing_penalty_s + self.rule_margin_penalty_s
 
 
+# Production values for the two unmeasured objective inputs, one source for
+# every driver (2026-09-25). They previously disagreed 40x (mu 0.4 vs 0.010)
+# and 7x (wheel MOI 1e-6 vs 1.39e-7). Same numbers as Part 2 physics_contract.
+DEFAULT_ROLLING_MU: float = 0.010          # PLACEHOLDER until a coast-down fit
+DEFAULT_WHEEL_MOI_KG_M2: float = 1.39e-7   # v2 CAD wheels, measured
+T36_FLOOR_KG: float = 0.048                # competition mass, cartridge excluded
+CARTRIDGE_KG: float = 0.023
+
+
 @dataclass(frozen=True)
 class OptimizerConfig:
     """Top-level configuration for the full search.
@@ -388,6 +397,15 @@ class CandidateOutcome:
     failure_reason: Optional[str]
     phi_snapshot_paths: dict = field(default_factory=dict)
     record_path: Optional[str] = None
+    # Competition mass (T3.6: cartridge excluded, ballast included). None when
+    # unknown. final_ranking EXCLUDES a car under the floor: a penalty sized to
+    # steer the descent is not a price a candidate may pay to win.
+    competition_mass_kg: Optional[float] = None
+
+    @property
+    def is_underweight(self) -> bool:
+        return (self.competition_mass_kg is not None
+                and self.competition_mass_kg < T36_FLOOR_KG - 1e-9)
 
     def __post_init__(self) -> None:
         if self.lifecycle_state not in ALLOWED_LIFECYCLE_STATES:

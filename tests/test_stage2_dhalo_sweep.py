@@ -376,10 +376,14 @@ def test_stage1_cargo_placement_reaches_the_built_geometry():
     # axle at 176 mm and loses 17.8% of the mandatory T4.2 volume, while
     # flip=False at the same x_start loses none. find_cargo_placement screens
     # only the halo pocket, so nothing upstream catches this.
+    # 2026-09-25: the 4 mm aesthetic wheel keep-out was removed (it also broke
+    # the T5.5 wall), which made flip=True at x_start LEGAL -- that collision
+    # came from the aesthetic margin, not a rule. Push the wide end 10 mm
+    # further aft so it genuinely overlaps the rear wheel's keep-clear.
     try:
         up.build_unified_geometry(
             W, xf, dh, init_mode="full", seed=0,
-            cargo_placement={"x_start_m": x_start, "z_base_m": z_base, "flip": True},
+            cargo_placement={"x_start_m": x_start + 0.010, "z_base_m": z_base, "flip": True},
         )
     except ValueError as exc:
         assert "cargo" in str(exc).lower(), exc

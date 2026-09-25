@@ -28,6 +28,17 @@ def test_inner_loop_zeroes_mass_push_when_ballast_absorbs():
     assert '_update_grads["dT_dmass"] = 0.0' in src
 
 
+def test_stability_flag_is_json_safe_with_numpy_inputs():
+    """Regression 2026-09-26: a numpy x_com made statically_stable np.bool_,
+    json.dump refused it, and no CI record was ever written."""
+    import json
+    import numpy as np
+    from stability_check import check_stability
+    r = check_stability(total_mass_kg=np.float64(0.071), x_com_m=np.float64(0.06),
+                        W_mm=120.3, prerequisites_met=False)
+    json.dumps({"s": r.statically_stable})
+
+
 if __name__ == "__main__":
     _mod = sys.modules[__name__]
     _fails = 0

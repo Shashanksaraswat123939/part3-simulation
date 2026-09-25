@@ -108,7 +108,8 @@ def check_stability(
     mg = total_mass_kg * GRAVITY_MPS2
     w_front = mg * (W_m - x_com_m) / W_m
     w_rear = mg * x_com_m / W_m
-    statically_stable = (w_front > 0.0) and (w_rear > 0.0)
+    # bool(): a numpy x_com makes this np.bool_, which json.dump rejects
+    statically_stable = bool(w_front > 0.0 and w_rear > 0.0)
     notes = "" if statically_stable else (
         f"COM outside wheelbase: x_com={x_com_m:.4f} m for W={W_m:.4f} m — "
         "negative static wheel load; candidate would tip"

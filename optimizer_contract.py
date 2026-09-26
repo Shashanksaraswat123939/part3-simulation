@@ -352,6 +352,13 @@ class OptimizerConfig:
     top_w_count: int = TOP_W_COUNT
     evolution_interval_iters: int = 10          # "after every N inner iterations"
     hj_dt: float = 0.5
+    # Body steps driven by the drag adjoint alone (the "aero phase"). Off:
+    # measured 2026-09-26 on GitHub Actions they raised D20 in every optimiser
+    # run -- coarse and medium, 1 mm and 0.3 mm trust radius, 12 of 12 steps,
+    # +2.7 % to +5 % -- although a single 0.3 mm medium step along the adjoint
+    # ranked correctly (descent -1.3 %, null -0.7 %, ascent +0.9 %). With it off
+    # the loop stops once ballast absorbs the mass: shape comes from Part 4.
+    aero_body_steps: bool = False
     require_cfd_convergence: bool = True
     random_seed: int = 0
     max_workers: int = 1

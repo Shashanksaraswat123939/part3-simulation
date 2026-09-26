@@ -441,6 +441,10 @@ def run_inner_loop(
             stop_reason = status.reason
             converged = status.converged
             break
+        if aero_phase and not config.aero_body_steps:
+            stop_reason = "mass converged (ballast absorbing); aero body steps disabled"
+            converged = True
+            break
 
     # Promote the best outcome to "converged" when the loop converged (spec
     # lifecycle: 'converged — inner loop converged, best candidate saved').

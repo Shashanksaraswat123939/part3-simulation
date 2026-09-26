@@ -28,6 +28,16 @@ def test_inner_loop_zeroes_mass_push_when_ballast_absorbs():
     assert '_update_grads["dT_dmass"] = 0.0' in src
 
 
+def test_aero_body_steps_are_off_and_stop_the_loop():
+    import dataclasses
+    import inspect
+    import inner_loop
+    from optimizer_contract import OptimizerConfig
+    f = {x.name: x.default for x in dataclasses.fields(OptimizerConfig)}
+    assert f["aero_body_steps"] is False
+    assert "if aero_phase and not config.aero_body_steps:" in inspect.getsource(inner_loop.run_inner_loop)
+
+
 def test_stability_flag_is_json_safe_with_numpy_inputs():
     """Regression 2026-09-26: a numpy x_com made statically_stable np.bool_,
     json.dump refused it, and no CI record was ever written."""

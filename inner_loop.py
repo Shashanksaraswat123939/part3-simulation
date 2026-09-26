@@ -77,6 +77,9 @@ class IterationLog:
     # adjoint you need D20 at w_mass=0, which means D20 has to be in the log.
     D20: Optional[float] = None
     total_mass_kg: Optional[float] = None
+    force_mean_stderr: Optional[float] = None
+    ballast_regime: str = "none"
+    ballast_kg: float = 0.0
 
 
 @dataclass
@@ -393,7 +396,14 @@ def run_inner_loop(
                 _feasible = _comp >= T36_MIN_COMPETITION_MASS_KG
 
             # Phase switch, with hysteresis (see `aero_phase` above).
-            if _comp is not None:
+            if log.ballast_regime == "absorbing":
+                # Ballast absorbs any body-mass change, so there is no mass
+                # left to steer by: the aero phase is the only phase.
+                if not aero_phase:
+                    print(f"[phase] {iter_id}: AERO-ONLY (ballast absorbing, "
+                          f"{log.ballast_kg*1000:.2f} g)", flush=True)
+                aero_phase = True
+            elif _comp is not None:
                 _was = aero_phase
                 if aero_phase:
                     if _comp < T36_MIN_COMPETITION_MASS_KG + AERO_PHASE_EXIT_MARGIN_KG:
@@ -411,7 +421,13 @@ def run_inner_loop(
             _metric = _thr = None
             if aero_phase and log.D20 is not None:
                 _metric = log.D20
-                _thr = AERO_CONVERGENCE_DELTA_D20_FRAC * abs(log.D20)
+                # Never below the measured noise of the solve itself: a step
+                # smaller than 2 standard errors of the mean is not a measured
+                # change, and counting it as "converged" stops on noise.
+                _frac = AERO_CONVERGENCE_DELTA_D20_FRAC
+                if log.force_mean_stderr is not None:
+                    _frac = max(_frac, 2.0 * log.force_mean_stderr)
+                _thr = _frac * abs(log.D20)
 
             status = tracker.update_success(
                 outcome.T_penalized,
@@ -440,6 +456,7 @@ def run_inner_loop(
             failure_reason=None,
             phi_snapshot_paths=best.phi_snapshot_paths,
             record_path=best.record_path,
+            competition_mass_kg=best.competition_mass_kg,
         )
 
     print(f"[inner_loop] {candidate_id} STOPPED after {len(history)} "
@@ -676,7 +693,11 @@ def _run_single_iteration(
         # dT/dmass is still the race objective's own number.
         _update_grads = dict(objective.gradients)
         _t36_descent = t36_descent_gradient(mass_report.total_mass_kg)
-        if _t36_descent is not None:
+        if getattr(mass_report, "ballast_regime", "none") == "absorbing":
+            # Ballast takes up any change of body mass: dT/d(body mass) = 0,
+            # so the skin answers to drag (and the small COM terms) only.
+            _update_grads["dT_dmass"] = 0.0
+        elif _t36_descent is not None:
             # REPLACES, does not add -- an added barrier cancels against the
             # physics term and parks the car inside the illegal region.
             _update_grads["dT_dmass"] = _t36_descent
@@ -765,12 +786,16 @@ def _run_single_iteration(
         d_halo_mm=outcome.d_halo_mm, lifecycle_state=outcome.lifecycle_state,
         T_raw=outcome.T_raw, T_penalized=outcome.T_penalized,
         failure_reason=None, phi_snapshot_paths=snaps, record_path=record_path,
+        competition_mass_kg=mass_report.total_mass_kg - _T36_CARTRIDGE_KG,
     )
     log = IterationLog(
         iteration=iteration, lifecycle_state=gate.lifecycle_state,
         T_raw=objective.T_raw, T_penalized=T_penalized,
         gradient_norm=grad_norm, failure_reason=None, record_path=record_path,
         D20=cfd.D20, total_mass_kg=mass_report.total_mass_kg,
+        force_mean_stderr=getattr(cfd, "force_mean_stderr", None),
+        ballast_regime=getattr(mass_report, "ballast_regime", "none"),
+        ballast_kg=getattr(mass_report, "ballast_kg", 0.0),
     )
     return outcome, log, snaps
 

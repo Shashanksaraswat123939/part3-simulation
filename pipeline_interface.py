@@ -86,6 +86,9 @@ class CFDOutcome:
     # warning in a worker thread.
     force_mean_stderr: Optional[float] = None
     force_drift: Optional[float] = None
+    # Half-car force per patch (car, wheels, wings, supports) when Part 4's
+    # surfaces are in the case; None for a body-only case.
+    patch_forces: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,15 @@ class MassReport:
     com_z_m: float
     propellant_mass_kg: float = 0.0
     propellant_com: tuple = (0.0, 0.0, 0.0)
+    # Legal ballast (Part 1 ballast.py), INCLUDED in total_mass_kg / com_*.
+    ballast_kg: float = 0.0
+    # "none" (ballast disabled), "absorbing" (body mass free: ballast takes up
+    # any change), "heavy" (no ballast, too heavy), "full" (capsule full, light).
+    ballast_regime: str = "none"
+
+    @property
+    def competition_mass_kg(self) -> float:
+        return self.total_mass_kg - 0.023
 
     def launch_com(self) -> tuple:
         """(mass, com_x, com_y, com_z) with a full propellant charge aboard."""
@@ -221,7 +233,8 @@ def _add_sibling_packages_to_path() -> None:
     root = os.path.dirname(here)
     # Support both the spec/internal package names and the actual local repo
     # folder names used beside this repository.
-    for pkg in ("part1_geometry", "part2_simulation", "part1-simulation", "part2-simulation"):
+    for pkg in ("part1_geometry", "part2_simulation", "part1-simulation", "part2-simulation",
+                "part4-simulation"):
         p = os.path.join(root, pkg)
         if p not in sys.path:
             sys.path.insert(0, p)
@@ -464,6 +477,9 @@ STL_TRIANGLE_BUDGET = 120_000
 
 # Re-exported so the decimation warning can name the envelope it failed. One
 # source of truth: surface_extraction owns these, set from real solver runs.
+# Module-level import of a Part 1 module: the sibling path must be set FIRST,
+# or importing this module fails outright (it did, in 2 of 8 CI test files).
+_add_sibling_packages_to_path()
 from surface_extraction import (  # noqa: E402
     MEASURED_SAFE_MIN_ANGLE_DEG, MEASURED_SAFE_SLIVER_FRACTION,
 )
@@ -629,8 +645,20 @@ def unified_bindings(
     stl_triangle_budget: int = STL_TRIANGLE_BUDGET,
     cargo_placement: Optional[dict] = None,
     seed_geometry=None,
+    ballast_material: Optional[str] = "lead",
+    hj_max_substeps: int = 6,
+    hj_trust_radius_m: float = 1.0e-3,
+    hj_aero_smooth_m: float = 0.0,
 ) -> PipelineBindings:
     """Bind Part 3 to the UNIFIED single-field geometry + the real objective.
+
+    2026-09-25 additions:
+      ballast_material   legal ballast in the capsule under the halo
+                         (Part 1 ballast.py). None disables it.
+      hj_max_substeps,   sub-steps per adjoint and their trust radius; measured
+      hj_trust_radius_m  9x more surface motion per CFD solve (rnd/step_size).
+      cfd_kwargs["extra_surfaces"] / adjoint_kwargs["extra_surfaces"] put the
+                         wheels, supports, halo and wings (Part 4) in the CFD.
 
     Same CFD / race-objective / adjoint bindings as real_bindings, but the
     geometry pipeline is the single labelled level set (unified_phi), not the
@@ -810,7 +838,12 @@ def unified_bindings(
         return geom
 
     def perturb_phi_fields(geom, seed, amplitude):
+        # COPY first: the evolutionary refill perturbs a survivor to make a new
+        # candidate, and mutating in place made the survivor and its clone the
+        # SAME geometry object in the population.
+        import copy as _copy
         from evolutionary import perturb_phi_array
+        geom = _copy.deepcopy(geom)
         geom.phi.grid = perturb_phi_array(geom.phi.grid, seed=seed, amplitude=amplitude)
         geom.phi.apply_hard_constraints()
         enforce_symmetry(geom)
@@ -887,11 +920,21 @@ def unified_bindings(
         machined = compute_mass_com(geom)
         full = ingest_mass_com(machined, fixed_hardware_for(geom),
                                propellant_mass_kg=_propellant_kg)
+        tot, cx, cy, cz = full.total_mass_kg, full.com_x_m, full.com_y_m, full.com_z_m
+        b, regime = 0.0, "none"
+        if ballast_material is not None:
+            import ballast as _bl
+            st = _bl.add_to_state({"total_mass_kg": tot, "com_x_m": cx, "com_z_m": cz},
+                                  geom.landmarks["ref_plane_A_m"], geom.d_halo_mm,
+                                  ballast_material)
+            b = st["ballast_kg"]
+            regime = _bl.describe(tot, ballast_material)["regime"]
+            tot, cx, cz = st["total_mass_kg"], st["com_x_m"], st["com_z_m"]
         return MassReport(
-            total_mass_kg=full.total_mass_kg, com_x_m=full.com_x_m,
-            com_y_m=full.com_y_m, com_z_m=full.com_z_m,
+            total_mass_kg=tot, com_x_m=cx, com_y_m=cy, com_z_m=cz,
             propellant_mass_kg=full.propellant_mass_kg,
             propellant_com=tuple(full.propellant_com),
+            ballast_kg=b, ballast_regime=regime,
         )
 
     def run_cfd(stl_half_path):
@@ -902,7 +945,8 @@ def unified_bindings(
                           residual_final=health.residual_final,
                           force_oscillation=health.force_oscillation,
                           force_mean_stderr=getattr(health, "force_mean_stderr", None),
-                          force_drift=getattr(health, "force_drift", None))
+                          force_drift=getattr(health, "force_drift", None),
+                          patch_forces=getattr(health, "patch_forces", None))
 
     def evaluate_objective(D20, L, m_total, h_com, x_com, mu, wheel_moi):
         p = _params(D20, L, m_total, h_com, x_com, mu, wheel_moi)
@@ -926,11 +970,13 @@ def unified_bindings(
 
     def update_phi(geom, sensitivity_field, half_mesh, dt, weights,
                    objective_gradients, mass_report):
-        apply_adjoint_to_unified(
+        return apply_adjoint_to_unified(
             geom, sensitivity_field, half_mesh, dt,
             {"w_aero": weights.w_aero, "w_mass": weights.w_mass,
              "w_com": weights.w_com, "w_mfg": weights.w_mfg},
             objective_gradients, mass_report,
+            max_substeps=hj_max_substeps, trust_radius_m=hj_trust_radius_m,
+            aero_smooth_m=hj_aero_smooth_m,
         )
 
     def write_record(outcome: dict) -> str:

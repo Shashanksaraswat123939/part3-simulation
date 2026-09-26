@@ -68,7 +68,8 @@ def final_ranking(candidates: Sequence[CandidateOutcome]) -> list[CandidateOutco
     "very slow cars", they are non-cars. Returns ascending by T_raw,
     ties broken by candidate_id.
     """
-    valid = [c for c in candidates if c.is_fully_valid and c.T_raw is not None]
+    valid = [c for c in candidates if c.is_fully_valid and c.T_raw is not None
+             and not getattr(c, "is_underweight", False)]
     return sorted(valid, key=lambda c: (c.T_raw, c.candidate_id))
 
 
